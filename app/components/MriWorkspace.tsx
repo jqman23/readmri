@@ -1,12 +1,14 @@
 'use client';
 
-import type { ChangeEvent, MouseEvent } from 'react';
+import type { ChangeEvent, InputHTMLAttributes, MouseEvent } from 'react';
 import { useMemo, useRef, useState } from 'react';
 import { ankleChecklist, patientFriendlyGlossary } from '../lib/ankleKnowledge';
 import { parseDicomFiles } from '../lib/dicom';
 import type { AiAnalysis, Annotation, DicomSeries } from '../lib/types';
 
 const annotationColors = ['#38bdf8', '#f97316', '#a3e635', '#f472b6', '#facc15'];
+
+const directoryInputProps = { webkitdirectory: '', directory: '' } as unknown as InputHTMLAttributes<HTMLInputElement>;
 
 function createDefaultAnalysis(): AiAnalysis {
   return {
@@ -56,7 +58,7 @@ export default function MriWorkspace() {
       setWarnings(result.warnings);
       setActiveSeriesId(result.series[0]?.id ?? '');
       setSliceIndex(0);
-      if (!result.series.length) setError('No readable MRI slices were found. Try uncompressed DICOM files exported as individual slices.');
+      if (!result.series.length) setError('No readable MRI slices were found. Upload the individual files from the DICOM series/image folder, not the DICOMDIR index or compressed JPEG/JPEG 2000 exports.');
     } catch (parseError) {
       setError(parseError instanceof Error ? parseError.message : 'Unable to parse those DICOM files.');
     } finally {
@@ -151,7 +153,11 @@ export default function MriWorkspace() {
         <aside className="card controls">
           <label className="upload">
             <span>{isParsing ? 'Reading DICOM…' : 'Upload DCM files'}</span>
-            <input type="file" accept=".dcm,application/dicom" multiple onChange={handleFiles} />
+            <input type="file" multiple onChange={handleFiles} />
+          </label>
+          <label className="upload secondaryUpload">
+            <span>{isParsing ? 'Reading DICOM…' : 'Upload DICOM folder'}</span>
+            <input type="file" multiple onChange={handleFiles} {...directoryInputProps} />
           </label>
 
           <div className="field">

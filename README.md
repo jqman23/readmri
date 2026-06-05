@@ -25,15 +25,27 @@ npm run dev
 
 ## Environment variables
 
-Create `.env.local` or set these in Vercel:
+Never hardcode or commit a real OpenAI API key, even if the GitHub repository is private. Keep the key in local environment variables or your deployment provider secret settings so it can be rotated without code changes.
+
+For local development, copy the example file and add your real key only to `.env.local`:
 
 ```bash
-OPENAI_API_KEY=sk-...
+cp .env.example .env.local
+```
+
+Then edit `.env.local`:
+
+```bash
+OPENAI_API_KEY=sk-your-real-key
 AI_MODEL=gpt-4.1
 ```
+
+For Vercel, set `OPENAI_API_KEY` and optional `AI_MODEL` in Project Settings → Environment Variables.
 
 If `OPENAI_API_KEY` is missing, the app returns safe placeholder guidance instead of pretending to interpret images.
 
 ## DICOM support notes
 
-This prototype focuses on functionality and supports common uncompressed, single-channel grayscale MR DICOM files. Compressed transfer syntaxes from some scanners/PACS exports may need a server-side DICOM pipeline or a full web imaging stack such as Cornerstone plus codecs.
+This prototype focuses on functionality and supports common uncompressed, single-channel grayscale MR DICOM files. In PACS export dialogs, choose **Explicit VR Little Endian** first, or **Implicit VR Little Endian** if needed. Do not choose RLE, JPEG, JPEG Lossless, or JPEG 2000 transfer syntaxes; those compressed exports may need a server-side DICOM pipeline or a full web imaging stack such as Cornerstone plus codecs.
+
+If the export includes a `DICOMDIR` file, that file is only an index for DICOM CD-style media and does not contain MRI pixels. Open the exported folder and upload the individual image slice files from the series/image folder, or use the app's folder upload control to select the exported DICOM folder.

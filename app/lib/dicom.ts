@@ -1,7 +1,58 @@
-import dicomParser from 'dicom-parser';
+import dicomParser, { type DataSet } from 'dicom-parser';
 import type { DicomSeries, DicomSlice } from './types';
 
-const text = (dataSet: dicomParser.DataSet, tag: string, fallback = '') => {
+const transferSyntaxNames: Record<string, string> = {
+  '1.2.840.10008.1.2': 'Implicit VR Little Endian',
+  '1.2.840.10008.1.2.1': 'Explicit VR Little Endian',
+  '1.2.840.10008.1.2.1.99': 'Deflated Explicit VR Little Endian',
+  '1.2.840.10008.1.2.2': 'Explicit VR Big Endian',
+  '1.2.840.10008.1.2.4.50': 'JPEG Baseline (Process 1)',
+  '1.2.840.10008.1.2.4.51': 'JPEG Extended (Process 2/4)',
+  '1.2.840.10008.1.2.4.57': 'JPEG Lossless (Process 14)',
+  '1.2.840.10008.1.2.4.70': 'JPEG Lossless (Process 14, Selection 1)',
+  '1.2.840.10008.1.2.4.90': 'JPEG 2000 Image Compression (Lossless)',
+  '1.2.840.10008.1.2.4.91': 'JPEG 2000 Image Compression',
+  '1.2.840.10008.1.2.5': 'RLE Lossless',
+};
+
+const supportedTransferSyntaxes = new Set([
+  '1.2.840.10008.1.2',
+  '1.2.840.10008.1.2.1',
+  '1.2.840.10008.1.2.2',
+]);
+
+const dicomDirectoryStorageUid = '1.2.840.10008.1.3.10';
+
+function transferSyntaxLabel(uid: string) {
+  return transferSyntaxNames[uid] ? `${transferSyntaxNames[uid]} (${uid})` : uid;
+}
+
+function isDicomDirectory(dataSet: DataSet, fileName: string) {
+  const normalizedName = fileName.toUpperCase();
+  return normalizedName === 'DICOMDIR' || text(dataSet, 'x00020002') === dicomDirectoryStorageUid || text(dataSet, 'x00080016') === dicomDirectoryStorageUid;
+}
+
+function explainMissingImageDimensions(dataSet: DataSet, fileName: string) {
+  if (isDicomDirectory(dataSet, fileName)) {
+    return 'DICOMDIR is only a study index, not an MRI image slice. Open the downloaded DICOM folder and upload the individual slice files inside the series/image folder instead.';
+  }
+
+  const hasPixelData = Boolean(dataSet.elements.x7fe00010);
+  if (!hasPixelData) {
+    return 'This file has no image pixel data or Rows/Columns tags. It may be a report, dose record, localizer metadata file, or DICOMDIR wrapper. Upload the individual MR image slice files from the series folder.';
+  }
+
+  return 'Missing Rows/Columns image dimensions. Try exporting the series as individual uncompressed DICOM image slices using Explicit VR Little Endian.';
+}
+
+function assertSupportedTransferSyntax(dataSet: DataSet) {
+  const transferSyntax = text(dataSet, 'x00020010', '1.2.840.10008.1.2.1');
+  if (!supportedTransferSyntaxes.has(transferSyntax)) {
+    throw new Error(`Unsupported compressed transfer syntax: ${transferSyntaxLabel(transferSyntax)}. Re-export as Explicit VR Little Endian or Implicit VR Little Endian.`);
+  }
+}
+
+const text = (dataSet: DataSet, tag: string, fallback = '') => {
   try {
     return dataSet.string(tag)?.trim() || fallback;
   } catch {
@@ -9,7 +60,7 @@ const text = (dataSet: dicomParser.DataSet, tag: string, fallback = '') => {
   }
 };
 
-const numberValue = (dataSet: dicomParser.DataSet, tag: string, fallback = 0) => {
+const numberValue = (dataSet: DataSet, tag: string, fallback = 0) => {
   const raw = text(dataSet, tag);
   const parsed = Number.parseFloat(raw.split('\\')[0]);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -35,7 +86,7 @@ function detectPlane(orientation?: string, description = ''): DicomSlice['acquis
   return axis === 0 ? 'sagittal' : axis === 1 ? 'coronal' : 'axial';
 }
 
-function getPixelArray(dataSet: dicomParser.DataSet, bytes: Uint8Array, rows: number, columns: number) {
+function getPixelArray(dataSet: DataSet, bytes: Uint8Array, rows: number, columns: number) {
   const pixelElement = dataSet.elements.x7fe00010;
   if (!pixelElement) throw new Error('No pixel data found.');
 
@@ -64,7 +115,7 @@ function getPixelArray(dataSet: dicomParser.DataSet, bytes: Uint8Array, rows: nu
   return pixels;
 }
 
-function renderDataUrl(dataSet: dicomParser.DataSet, bytes: Uint8Array, rows: number, columns: number) {
+function renderDataUrl(dataSet: DataSet, bytes: Uint8Array, rows: number, columns: number) {
   const pixels = getPixelArray(dataSet, bytes, rows, columns);
   const slope = numberValue(dataSet, 'x00281053', 1);
   const intercept = numberValue(dataSet, 'x00281052', 0);
@@ -115,11 +166,12 @@ export async function parseDicomFiles(files: File[]): Promise<{ series: DicomSer
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const dataSet = dicomParser.parseDicom(bytes, { untilTag: undefined });
+      assertSupportedTransferSyntax(dataSet);
       const modality = text(dataSet, 'x00080060');
       const rows = numberValue(dataSet, 'x00280010');
       const columns = numberValue(dataSet, 'x00280011');
       if (modality && modality !== 'MR') warnings.push(`${file.name}: modality is ${modality}, not MR.`);
-      if (!rows || !columns) throw new Error('Missing image dimensions.');
+      if (!rows || !columns) throw new Error(explainMissingImageDimensions(dataSet, file.name));
 
       const seriesDescription = text(dataSet, 'x0008103e', 'Untitled series');
       const sequenceName = text(dataSet, 'x00180024');
