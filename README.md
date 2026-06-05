@@ -25,12 +25,22 @@ npm run dev
 
 ## Environment variables
 
-Create `.env.local` or set these in Vercel:
+Never hardcode or commit a real OpenAI API key, even if the GitHub repository is private. Keep the key in local environment variables or your deployment provider secret settings so it can be rotated without code changes.
+
+For local development, copy the example file and add your real key only to `.env.local`:
 
 ```bash
-OPENAI_API_KEY=sk-...
+cp .env.example .env.local
+```
+
+Then edit `.env.local`:
+
+```bash
+OPENAI_API_KEY=sk-your-real-key
 AI_MODEL=gpt-4.1
 ```
+
+For Vercel, set `OPENAI_API_KEY` and optional `AI_MODEL` in Project Settings → Environment Variables.
 
 If `OPENAI_API_KEY` is missing, the app returns safe placeholder guidance instead of pretending to interpret images.
 
