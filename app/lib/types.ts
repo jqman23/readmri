@@ -2,11 +2,14 @@ export type Annotation = {
   id: string;
   x: number;
   y: number;
+  width?: number;
+  height?: number;
   label: string;
   note: string;
   color: string;
   sliceIndex: number;
   seriesId: string;
+  source?: 'user' | 'ai';
 };
 
 export type DicomSlice = {
@@ -39,12 +42,26 @@ export type DicomSeries = {
   slices: DicomSlice[];
 };
 
+export type AiImageReference = {
+  seriesId: string;
+  seriesDescription: string;
+  sliceIndex: number;
+  fileName: string;
+  instanceNumber: number;
+  label: string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+};
+
 export type AiFinding = {
   region: string;
   plainLanguage: string;
   whyItMatters: string;
   confidence: 'low' | 'medium' | 'high';
   suggestedFollowUp: string;
+  references: AiImageReference[];
 };
 
 export type AiAnalysis = {
@@ -54,4 +71,5 @@ export type AiAnalysis = {
   findings: AiFinding[];
   questionsForDoctor: string[];
   limitations: string[];
+  referencedAnnotations: Annotation[];
 };

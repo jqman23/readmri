@@ -78,3 +78,21 @@ li { margin: 8px 0; }
   .hero, .grid, .lowerGrid { grid-template-columns: 1fr; display: grid; }
   .controls, .analysis { position: static; }
 }
+
+.secondary { width: 100%; margin-top: 10px; border: 1px solid rgba(148, 163, 184, 0.35); border-radius: 14px; padding: 11px 14px; background: rgba(148, 163, 184, 0.08); color: #dbeafe; font-weight: 800; cursor: pointer; }
+.secondary:disabled { opacity: 0.55; cursor: not-allowed; }
+.seriesPicker { margin-top: 18px; border: 1px solid var(--line); border-radius: 16px; padding: 12px; background: rgba(2, 6, 23, 0.36); }
+.seriesPickerHeader { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; margin-bottom: 10px; color: var(--muted); font-size: 0.88rem; }
+.seriesPickerHeader button { border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 999px; background: rgba(56, 189, 248, 0.08); color: #bae6fd; cursor: pointer; font-size: 0.76rem; font-weight: 900; padding: 5px 9px; }
+.seriesCheck { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start; padding: 9px 0; border-top: 1px solid rgba(148, 163, 184, 0.12); color: #dbeafe; font-weight: 800; }
+.seriesCheck:first-of-type { border-top: 0; }
+.seriesCheck input { width: auto; margin-top: 4px; }
+.seriesCheck small { display: block; color: var(--muted); font-weight: 600; margin-top: 2px; }
+.aiPin { border-radius: 8px; background: rgba(250, 204, 21, 0.12); min-width: 20px; min-height: 20px; }
+.aiPin span { border-radius: 8px; }
+.annotationList { display: grid; gap: 8px; margin-top: 14px; }
+.annotationList button, .references button { border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 12px; background: rgba(15, 23, 42, 0.8); color: #dbeafe; cursor: pointer; padding: 9px 10px; text-align: left; }
+.annotationList small { display: block; color: var(--muted); margin-top: 3px; }
+.references { display: grid; gap: 8px; margin-top: 12px; }
+.references b { color: #bae6fd; font-size: 0.82rem; }
+.references button { color: #bae6fd; font-size: 0.84rem; }
