@@ -10,6 +10,25 @@ import type { AiAnalysis, Annotation, DicomSeries } from '../lib/types';
 
 const annotationColors = ['#38bdf8', '#f97316', '#a3e635', '#f472b6', '#facc15'];
 
+
+function promptVideoFrameOptions(videoCount: number): VideoFrameOptions {
+  const frameCountInput = window.prompt(
+    `${videoCount} video file${videoCount === 1 ? '' : 's'} selected. How many frames/slices should ReadMRI extract?`,
+    '50',
+  );
+  if (frameCountInput === null) throw new Error('Video import canceled.');
+
+  const fpsInput = window.prompt('What FPS should ReadMRI use to step through the video?', '20');
+  if (fpsInput === null) throw new Error('Video import canceled.');
+
+  const frameCount = Number.parseInt(frameCountInput, 10);
+  const fps = Number.parseFloat(fpsInput);
+  if (!Number.isFinite(frameCount) || frameCount < 1) throw new Error('Video frame count must be a positive whole number.');
+  if (!Number.isFinite(fps) || fps <= 0) throw new Error('Video FPS must be a positive number.');
+
+  return { frameCount, fps };
+}
+
 function createDefaultAnalysis(): AiAnalysis {
   return {
     summary: 'Upload ankle/foot MRI DICOM series, pick representative slices, and run AI explanation for patient-friendly education.',
