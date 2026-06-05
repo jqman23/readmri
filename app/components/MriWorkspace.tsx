@@ -5,8 +5,9 @@ import { useMemo, useRef, useState } from 'react';
 import { ankleChecklist, patientFriendlyGlossary } from '../lib/ankleKnowledge';
 import { expandUploadFiles } from '../lib/archives';
 import { parseDicomFiles } from '../lib/dicom';
+import { parseImageFiles } from '../lib/image';
 import { parseVideoFiles, type VideoFrameOptions } from '../lib/video';
-import { describeFiles, getDicomCandidateFiles, getFilesFromDataTransfer, isVideoFile, type UploadFile } from '../lib/upload';
+import { describeFiles, getDicomCandidateFiles, getFilesFromDataTransfer, isImageFile, isVideoFile, type UploadFile } from '../lib/upload';
 import type { AiAnalysis, Annotation, DicomSeries } from '../lib/types';
 
 const annotationColors = ['#38bdf8', '#f97316', '#a3e635', '#f472b6', '#facc15'];
@@ -77,33 +78,35 @@ export default function MriWorkspace() {
     try {
       const expanded = await expandUploadFiles(incomingFiles);
       const videoFiles = expanded.files.filter(isVideoFile);
-      const nonVideoFiles = expanded.files.filter((file) => !isVideoFile(file));
-      const { dicomCandidates, skippedNonDicom } = await getDicomCandidateFiles(nonVideoFiles);
-      const { summary } = describeFiles(expanded.files, dicomCandidates.length, expanded.archiveCount, skippedNonDicom, videoFiles.length);
+      const imageFiles = expanded.files.filter(isImageFile);
+      const dicomOrUnknownFiles = expanded.files.filter((file) => !isVideoFile(file) && !isImageFile(file));
+      const { dicomCandidates, skippedNonDicom } = await getDicomCandidateFiles(dicomOrUnknownFiles);
+      const { summary } = describeFiles(expanded.files, dicomCandidates.length, expanded.archiveCount, skippedNonDicom, videoFiles.length, imageFiles.length);
       setUploadSummary(summary);
 
-      if (!dicomCandidates.length && !videoFiles.length) {
+      if (!dicomCandidates.length && !videoFiles.length && !imageFiles.length) {
         setWarnings(expanded.warnings);
-        setError('No files were selected. Choose DICOM files, an MP4/video export, a folder/CD that contains MRI slices, or a .zip/.tar/.tgz/.gz archive.');
+        setError('No files were selected. Choose DICOM files, JPEG/PNG images, an MP4/video export, a folder/CD that contains MRI slices, or a .zip/.tar/.tgz/.gz archive.');
         return;
       }
 
       const videoOptions = videoFiles.length ? promptVideoFrameOptions(videoFiles.length) : null;
-      const [dicomResult, videoResult] = await Promise.all([
+      const [dicomResult, imageResult, videoResult] = await Promise.all([
         dicomCandidates.length ? parseDicomFiles(dicomCandidates) : Promise.resolve({ series: [], warnings: [] }),
+        imageFiles.length ? parseImageFiles(imageFiles) : Promise.resolve({ series: [], warnings: [] }),
         videoOptions ? parseVideoFiles(videoFiles, videoOptions) : Promise.resolve({ series: [], warnings: [] }),
       ]);
-      const combinedSeries = [...dicomResult.series, ...videoResult.series];
-      const allWarnings = [...expanded.warnings, ...dicomResult.warnings, ...videoResult.warnings];
+      const combinedSeries = [...dicomResult.series, ...imageResult.series, ...videoResult.series];
+      const allWarnings = [...expanded.warnings, ...dicomResult.warnings, ...imageResult.warnings, ...videoResult.warnings];
       setSeries(combinedSeries);
       setWarnings(allWarnings);
       setActiveSeriesId(combinedSeries[0]?.id ?? '');
       setSliceIndex(0);
       setAnnotations([]);
       if (!combinedSeries.length) {
-        setError(videoFiles.length && !dicomCandidates.length
+        setError(videoFiles.length && !dicomCandidates.length && !imageFiles.length
           ? 'No readable video frames were found. Try an MP4 file that your browser can play, then enter a positive frame count and FPS.'
-          : 'No readable MRI slices were found. Select DICOM image files, an MP4/video export, or upload the exported .zip/.tar/.tgz archive.');
+          : 'No readable MRI slices were found. Select DICOM files, JPEG/PNG image exports, an MP4/video export, or upload the exported .zip/.tar/.tgz archive.');
       }
     } catch (parseError) {
       setError(parseError instanceof Error ? parseError.message : 'Unable to parse those DICOM files.');
@@ -218,12 +221,12 @@ export default function MriWorkspace() {
             onDragLeave={() => setIsDragOver(false)}
             onDrop={handleDrop}
           >
-            <span>{isParsing ? 'Reading images…' : 'Upload DICOM, MP4/video, folder, CD export, or archive'}</span>
-            <small>Click to pick files/archives, or drag a study/series folder here. Extensionless DICOM files, MP4 videos, and .zip/.tar/.tgz/.gz exports are accepted.</small>
-            <input type="file" multiple accept=".dcm,.dicom,.ima,.mp4,.m4v,.mov,.webm,.zip,.tar,.tgz,.gz,application/dicom,video/mp4,video/quicktime,video/webm,application/zip,application/gzip" onChange={handleFiles} />
+            <span>{isParsing ? 'Reading images…' : 'Upload DICOM, images, MP4/video, folder, CD export, or archive'}</span>
+            <small>Click to pick files/archives, or drag a study/series folder here. Extensionless DICOM files, JPEG/PNG images, MP4 videos, and .zip/.tar/.tgz/.gz exports are accepted.</small>
+            <input type="file" multiple accept=".dcm,.dicom,.ima,.jpg,.jpeg,.png,.bmp,.gif,.webp,.mp4,.m4v,.mov,.webm,.zip,.tar,.tgz,.gz,application/dicom,image/jpeg,image/png,image/bmp,image/gif,image/webp,video/mp4,video/quicktime,video/webm,application/zip,application/gzip" onChange={handleFiles} />
           </label>
           <label className="folderUpload">
-            Select a DICOM folder or mounted CD
+            Select a DICOM/image folder or mounted CD
             <input
               type="file"
               multiple
@@ -297,7 +300,7 @@ export default function MriWorkspace() {
               </div>
             </>
           ) : (
-            <div className="empty">Upload individual DICOM files, an MP4/video export, drag a series folder/CD export, or pick a compressed .zip/.tar/.tgz archive from your MRI disc/export.</div>
+            <div className="empty">Upload individual DICOM files, JPEG/PNG image exports, an MP4/video export, drag a series folder/CD export, or pick a compressed .zip/.tar/.tgz archive from your MRI disc/export.</div>
           )}
         </section>
 
