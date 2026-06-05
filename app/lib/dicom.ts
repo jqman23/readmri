@@ -47,88 +47,6 @@ const numberValue = (dataSet: DataSet, tag: string, fallback = 0) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-function ascii(bytes: Uint8Array, offset: number, length: number) {
-  return new TextDecoder('ascii').decode(bytes.slice(offset, offset + length));
-}
-
-function writeAscii(bytes: Uint8Array, offset: number, length: number, value: string) {
-  bytes.fill(0x20, offset, offset + length);
-  const encoded = new TextEncoder().encode(value);
-  bytes.set(encoded.slice(0, length), offset);
-  if (encoded.length < length) bytes[offset + encoded.length] = 0;
-}
-
-function readUint16(bytes: Uint8Array, offset: number) {
-  return bytes[offset] | (bytes[offset + 1] << 8);
-}
-
-function readUint32(bytes: Uint8Array, offset: number) {
-  return bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24);
-}
-
-function explicitVrLength(bytes: Uint8Array, offset: number) {
-  const vr = ascii(bytes, offset + 4, 2);
-  if (['OB', 'OD', 'OF', 'OL', 'OW', 'SQ', 'UC', 'UR', 'UT', 'UN'].includes(vr)) {
-    return { headerLength: 12, valueLength: readUint32(bytes, offset + 8) };
-  }
-  return { headerLength: 8, valueLength: readUint16(bytes, offset + 6) };
-}
-
-function getPart10Meta(bytes: Uint8Array) {
-  if (bytes.length < 132 || ascii(bytes, 128, 4) !== 'DICM') return null;
-
-  let offset = 132;
-  let transferSyntaxOffset = -1;
-  let transferSyntaxLength = 0;
-  let transferSyntax = '';
-
-  while (offset + 8 <= bytes.length) {
-    const group = readUint16(bytes, offset);
-    if (group !== 0x0002) break;
-
-    const element = readUint16(bytes, offset + 2);
-    const { headerLength, valueLength } = explicitVrLength(bytes, offset);
-    const valueOffset = offset + headerLength;
-    if (valueOffset + valueLength > bytes.length) break;
-
-    if (element === 0x0010) {
-      transferSyntaxOffset = valueOffset;
-      transferSyntaxLength = valueLength;
-      transferSyntax = ascii(bytes, valueOffset, valueLength).replace(/\0/g, '').trim();
-    }
-
-    offset = valueOffset + valueLength;
-  }
-
-  return { dataSetOffset: offset, transferSyntax, transferSyntaxOffset, transferSyntaxLength };
-}
-
-async function inflateRawBytes(bytes: Uint8Array) {
-  if (typeof DecompressionStream === 'undefined') {
-    throw new Error('This browser cannot inflate deflated DICOM datasets. Try exporting as Explicit VR Little Endian or use a current Chrome, Edge, or Safari build.');
-  }
-
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  const stream = new Blob([copy.buffer]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-async function inflateDeflatedPart10(bytes: Uint8Array) {
-  const meta = getPart10Meta(bytes);
-  if (!meta || meta.transferSyntax !== '1.2.840.10008.1.2.1.99') return bytes;
-  if (meta.transferSyntaxOffset < 0) return bytes;
-
-  const inflated = await inflateRawBytes(bytes.slice(meta.dataSetOffset));
-  const patchedHeader = bytes.slice(0, meta.dataSetOffset);
-  writeAscii(patchedHeader, meta.transferSyntaxOffset, meta.transferSyntaxLength, '1.2.840.10008.1.2.1');
-
-  const full = new Uint8Array(patchedHeader.length + inflated.length);
-  full.set(patchedHeader, 0);
-  full.set(inflated, patchedHeader.length);
-  return full;
-}
-
 function transferSyntaxName(transferSyntax: string) {
   return TRANSFER_SYNTAX_NAMES[transferSyntax] ?? (transferSyntax || 'DICOM default transfer syntax');
 }
@@ -149,17 +67,15 @@ function sopClassName(sopClassUid: string) {
   return SOP_CLASS_NAMES[sopClassUid] ?? (sopClassUid || 'unknown DICOM object');
 }
 
-async function parseDicomDataSet(bytes: Uint8Array) {
-  const parseBytes = await inflateDeflatedPart10(bytes);
-
+function parseDicomDataSet(bytes: Uint8Array) {
   try {
-    return { dataSet: dicomParser.parseDicom(parseBytes, { untilTag: undefined }), parseBytes };
+    return dicomParser.parseDicom(bytes, { untilTag: undefined });
   } catch (part10Error) {
     const rawErrors: unknown[] = [part10Error];
 
     for (const transferSyntax of RAW_PARSE_TRANSFER_SYNTAXES) {
       try {
-        return { dataSet: dicomParser.parseDicom(parseBytes, { TransferSyntaxUID: transferSyntax, untilTag: undefined }), parseBytes };
+        return dicomParser.parseDicom(bytes, { TransferSyntaxUID: transferSyntax, untilTag: undefined });
       } catch (rawError) {
         rawErrors.push(rawError);
       }
@@ -495,8 +411,7 @@ export async function parseDicomFiles(files: File[]): Promise<{ series: DicomSer
   for (const file of files) {
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const parsed = await parseDicomDataSet(bytes);
-      const { dataSet, parseBytes } = parsed;
+      const dataSet = parseDicomDataSet(bytes);
       const modality = text(dataSet, 'x00080060');
       const rows = numberValue(dataSet, 'x00280010');
       const columns = numberValue(dataSet, 'x00280011');
@@ -513,7 +428,7 @@ export async function parseDicomFiles(files: File[]): Promise<{ series: DicomSer
       const sequenceName = text(dataSet, 'x00180024');
       const orientation = text(dataSet, 'x00200037');
       const seriesInstanceUID = text(dataSet, 'x0020000e', `series-${seriesDescription}`);
-      const rendered = await renderDataUrl(dataSet, parseBytes, rows, columns);
+      const rendered = await renderDataUrl(dataSet, bytes, rows, columns);
       if (rendered.warning) warnings.push(`${file.name}: ${rendered.warning}`);
 
       slices.push({

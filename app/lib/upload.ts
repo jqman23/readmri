@@ -23,7 +23,6 @@ type DataTransferItemWithEntry = DataTransferItem & {
 };
 
 const DICOM_EXTENSIONS = new Set(['.dcm', '.dicom', '.ima']);
-const VIDEO_EXTENSIONS = new Set(['.mp4', '.m4v', '.mov']);
 const KNOWN_NON_DICOM_EXTENSIONS = new Set([
   '.bmp',
   '.css',
@@ -106,24 +105,6 @@ function extensionOf(file: UploadFile) {
   return dotIndex >= 0 ? lastSegment.slice(dotIndex) : '';
 }
 
-
-export function isVideoFile(file: UploadFile) {
-  const extension = extensionOf(file);
-  return VIDEO_EXTENSIONS.has(extension) || file.type.startsWith('video/');
-}
-
-export function splitUploadFiles(files: UploadFile[]) {
-  const videoFiles: UploadFile[] = [];
-  const otherFiles: UploadFile[] = [];
-
-  for (const file of files) {
-    if (isVideoFile(file)) videoFiles.push(file);
-    else otherFiles.push(file);
-  }
-
-  return { videoFiles, otherFiles };
-}
-
 async function hasDicomPreamble(file: UploadFile) {
   if (file.size < 132) return false;
   const header = new Uint8Array(await file.slice(128, 132).arrayBuffer());
@@ -159,7 +140,7 @@ export async function getDicomCandidateFiles(files: UploadFile[]): Promise<{ dic
   return { dicomCandidates: candidates, skippedNonDicom };
 }
 
-export function describeFiles(files: UploadFile[], dicomCandidateCount?: number, archiveCount = 0, skippedNonDicom = 0, videoCount = 0) {
+export function describeFiles(files: UploadFile[], dicomCandidateCount?: number, archiveCount = 0, skippedNonDicom = 0) {
   const nonEmpty = files.filter((file) => file.size > 0);
   const skippedEmpty = files.length - nonEmpty.length;
   const selectedCount = dicomCandidateCount ?? nonEmpty.length;
@@ -170,6 +151,6 @@ export function describeFiles(files: UploadFile[], dicomCandidateCount?: number,
   ).size;
 
   return {
-    summary: `${selectedCount.toLocaleString()} DICOM candidate${selectedCount === 1 ? '' : 's'} selected${folderCount ? ` from ${folderCount.toLocaleString()} folder${folderCount === 1 ? '' : 's'}` : ''}${archiveCount ? ` after unpacking ${archiveCount.toLocaleString()} archive${archiveCount === 1 ? '' : 's'}` : ''}${videoCount ? ` plus ${videoCount.toLocaleString()} video file${videoCount === 1 ? '' : 's'}` : ''}${skippedNonDicom ? ` (${skippedNonDicom.toLocaleString()} viewer/document file${skippedNonDicom === 1 ? '' : 's'} skipped)` : ''}${skippedEmpty ? ` (${skippedEmpty.toLocaleString()} empty skipped)` : ''}.`,
+    summary: `${selectedCount.toLocaleString()} DICOM candidate${selectedCount === 1 ? '' : 's'} selected${folderCount ? ` from ${folderCount.toLocaleString()} folder${folderCount === 1 ? '' : 's'}` : ''}${archiveCount ? ` after unpacking ${archiveCount.toLocaleString()} archive${archiveCount === 1 ? '' : 's'}` : ''}${skippedNonDicom ? ` (${skippedNonDicom.toLocaleString()} viewer/document file${skippedNonDicom === 1 ? '' : 's'} skipped)` : ''}${skippedEmpty ? ` (${skippedEmpty.toLocaleString()} empty skipped)` : ''}.`,
   };
 }
