@@ -16,6 +16,7 @@ const RAW_PARSE_TRANSFER_SYNTAXES = [
 ];
 
 const NON_IMAGE_WARNING_LIMIT = 8;
+const MAX_FRAMES_PER_DICOM_FILE = 500;
 
 const TRANSFER_SYNTAX_NAMES: Record<string, string> = {
   '1.2.840.10008.1.2': 'Implicit VR Little Endian',
@@ -120,7 +121,7 @@ function getPixelElement(dataSet: DataSet) {
   return pixelElement;
 }
 
-function getPixelArray(dataSet: DataSet, bytes: Uint8Array, rows: number, columns: number) {
+function getPixelArray(dataSet: DataSet, bytes: Uint8Array, rows: number, columns: number, frameIndex = 0) {
   const pixelElement = getPixelElement(dataSet);
   const transferSyntax = text(dataSet, 'x00020010');
   if (!UNCOMPRESSED_TRANSFER_SYNTAXES.has(transferSyntax)) {
@@ -137,11 +138,12 @@ function getPixelArray(dataSet: DataSet, bytes: Uint8Array, rows: number, column
   const start = pixelElement.dataOffset;
   const littleEndian = !transferSyntax.includes('1.2.840.10008.1.2.2');
   const expectedBytes = count * (bitsAllocated <= 8 ? 1 : 2);
-  if (pixelElement.length < expectedBytes) {
-    throw new Error('Pixel data is shorter than expected for this slice. It may be compressed or truncated.');
+  const frameOffset = frameIndex * expectedBytes;
+  if (pixelElement.length < frameOffset + expectedBytes) {
+    throw new Error(`Pixel data is shorter than expected for frame ${frameIndex + 1}. It may be compressed or truncated.`);
   }
 
-  const view = new DataView(bytes.buffer, bytes.byteOffset + start, pixelElement.length);
+  const view = new DataView(bytes.buffer, bytes.byteOffset + start + frameOffset, expectedBytes);
   const pixels = new Float32Array(count);
 
   if (bitsAllocated <= 8) {
@@ -181,8 +183,8 @@ function windowRange(dataSet: DataSet, pixels: Float32Array, samplesPerPixel: nu
   return { low, range: Math.max(high - low, 1), slope, intercept };
 }
 
-function renderUncompressedDataUrl(dataSet: DataSet, bytes: Uint8Array, rows: number, columns: number) {
-  const { pixels, samplesPerPixel } = getPixelArray(dataSet, bytes, rows, columns);
+function renderUncompressedDataUrl(dataSet: DataSet, bytes: Uint8Array, rows: number, columns: number, frameIndex = 0) {
+  const { pixels, samplesPerPixel } = getPixelArray(dataSet, bytes, rows, columns, frameIndex);
   const { low, range, slope, intercept } = windowRange(dataSet, pixels, samplesPerPixel);
   const photometricInterpretation = text(dataSet, 'x00280004').toUpperCase();
 
@@ -250,9 +252,9 @@ function decodeRleSegment(frame: Uint8Array, offset: number, end: number, expect
   return output;
 }
 
-function decodeRlePixels(dataSet: DataSet, rows: number, columns: number) {
+function decodeRlePixels(dataSet: DataSet, rows: number, columns: number, frameIndex = 0) {
   const pixelElement = getPixelElement(dataSet);
-  const frame = dicomParser.readEncapsulatedPixelData(dataSet, pixelElement, 0);
+  const frame = dicomParser.readEncapsulatedPixelData(dataSet, pixelElement, frameIndex);
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
   const segmentCount = view.getUint32(0, true);
   const bitsAllocated = numberValue(dataSet, 'x00280100', 16);
@@ -291,8 +293,8 @@ function decodeRlePixels(dataSet: DataSet, rows: number, columns: number) {
   return { pixels, samplesPerPixel };
 }
 
-function renderRleDataUrl(dataSet: DataSet, rows: number, columns: number) {
-  const { pixels, samplesPerPixel } = decodeRlePixels(dataSet, rows, columns);
+function renderRleDataUrl(dataSet: DataSet, rows: number, columns: number, frameIndex = 0) {
+  const { pixels, samplesPerPixel } = decodeRlePixels(dataSet, rows, columns, frameIndex);
   const { low, range, slope, intercept } = windowRange(dataSet, pixels, samplesPerPixel);
 
   const canvas = document.createElement('canvas');
@@ -331,9 +333,9 @@ function encodedMimeTypes(transferSyntax: string) {
   return ['image/jpeg'];
 }
 
-async function renderEncodedImageDataUrl(dataSet: DataSet, rows: number, columns: number, transferSyntax: string) {
+async function renderEncodedImageDataUrl(dataSet: DataSet, rows: number, columns: number, transferSyntax: string, frameIndex = 0) {
   const pixelElement = getPixelElement(dataSet);
-  const frame = dicomParser.readEncapsulatedPixelData(dataSet, pixelElement, 0);
+  const frame = dicomParser.readEncapsulatedPixelData(dataSet, pixelElement, frameIndex);
   let lastError: unknown;
 
   for (const mimeType of encodedMimeTypes(transferSyntax)) {
@@ -382,16 +384,16 @@ function renderPlaceholderDataUrl(rows: number, columns: number, title: string, 
   return canvas.toDataURL('image/png');
 }
 
-async function renderDataUrl(dataSet: DataSet, bytes: Uint8Array, rows: number, columns: number) {
+async function renderDataUrl(dataSet: DataSet, bytes: Uint8Array, rows: number, columns: number, frameIndex = 0) {
   const transferSyntax = text(dataSet, 'x00020010');
   if (UNCOMPRESSED_TRANSFER_SYNTAXES.has(transferSyntax)) {
-    return { dataUrl: renderUncompressedDataUrl(dataSet, bytes, rows, columns) };
+    return { dataUrl: renderUncompressedDataUrl(dataSet, bytes, rows, columns, frameIndex) };
   }
 
   try {
     const dataUrl = transferSyntax === '1.2.840.10008.1.2.5'
-      ? renderRleDataUrl(dataSet, rows, columns)
-      : await renderEncodedImageDataUrl(dataSet, rows, columns, transferSyntax);
+      ? renderRleDataUrl(dataSet, rows, columns, frameIndex)
+      : await renderEncodedImageDataUrl(dataSet, rows, columns, transferSyntax, frameIndex);
     return { dataUrl, warning: `${transferSyntaxName(transferSyntax)} compressed DICOM decoded in the browser.` };
   } catch (error) {
     const syntax = transferSyntaxName(transferSyntax);
@@ -427,31 +429,43 @@ export async function parseDicomFiles(files: File[]): Promise<{ series: DicomSer
       const seriesDescription = text(dataSet, 'x0008103e', 'Untitled series');
       const sequenceName = text(dataSet, 'x00180024');
       const orientation = text(dataSet, 'x00200037');
-      const seriesInstanceUID = text(dataSet, 'x0020000e', `series-${seriesDescription}`);
-      const rendered = await renderDataUrl(dataSet, bytes, rows, columns);
-      if (rendered.warning) warnings.push(`${file.name}: ${rendered.warning}`);
+      const baseSeriesInstanceUID = text(dataSet, 'x0020000e', `series-${seriesDescription}`);
+      const dicomFrameCount = Math.max(1, Math.floor(numberValue(dataSet, 'x00280008', 1)));
+      const frameCount = Math.min(dicomFrameCount, MAX_FRAMES_PER_DICOM_FILE);
+      if (dicomFrameCount > MAX_FRAMES_PER_DICOM_FILE) {
+        warnings.push(`${file.name}: contains ${dicomFrameCount.toLocaleString()} frames; imported the first ${MAX_FRAMES_PER_DICOM_FILE.toLocaleString()} to keep the browser responsive.`);
+      }
 
-      slices.push({
-        id: `${seriesInstanceUID}-${text(dataSet, 'x00200013', file.name)}`,
-        fileName: file.name,
-        rows,
-        columns,
-        instanceNumber: numberValue(dataSet, 'x00200013'),
-        seriesInstanceUID,
-        seriesDescription,
-        sequenceName,
-        imageOrientationPatient: orientation,
-        imagePositionPatient: text(dataSet, 'x00200032'),
-        sliceLocation: numberValue(dataSet, 'x00201041', Number.NaN),
-        pixelSpacing: text(dataSet, 'x00280030'),
-        windowCenter: numberValue(dataSet, 'x00281050', Number.NaN),
-        windowWidth: numberValue(dataSet, 'x00281051', Number.NaN),
-        modality,
-        studyDescription: text(dataSet, 'x00081030'),
-        bodyPartExamined: text(dataSet, 'x00180015'),
-        acquisitionPlane: detectPlane(orientation, seriesDescription),
-        canvasDataUrl: rendered.dataUrl,
-      });
+      for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+        const rendered = await renderDataUrl(dataSet, bytes, rows, columns, frameIndex);
+        if (rendered.warning && frameIndex === 0) warnings.push(`${file.name}: ${rendered.warning}`);
+
+        const frameSuffix = frameCount > 1 ? ` frame ${frameIndex + 1}` : '';
+        const seriesInstanceUID = frameCount > 1 ? `${baseSeriesInstanceUID}-multiframe` : baseSeriesInstanceUID;
+        const baseInstanceNumber = numberValue(dataSet, 'x00200013', 1);
+
+        slices.push({
+          id: `${seriesInstanceUID}-${baseInstanceNumber}-${frameIndex + 1}`,
+          fileName: `${file.name}${frameSuffix}`,
+          rows,
+          columns,
+          instanceNumber: baseInstanceNumber + frameIndex,
+          seriesInstanceUID,
+          seriesDescription,
+          sequenceName,
+          imageOrientationPatient: orientation,
+          imagePositionPatient: text(dataSet, 'x00200032'),
+          sliceLocation: Number.isFinite(numberValue(dataSet, 'x00201041', Number.NaN)) ? numberValue(dataSet, 'x00201041', Number.NaN) + frameIndex : frameIndex,
+          pixelSpacing: text(dataSet, 'x00280030'),
+          windowCenter: numberValue(dataSet, 'x00281050', Number.NaN),
+          windowWidth: numberValue(dataSet, 'x00281051', Number.NaN),
+          modality,
+          studyDescription: text(dataSet, 'x00081030'),
+          bodyPartExamined: text(dataSet, 'x00180015'),
+          acquisitionPlane: detectPlane(orientation, seriesDescription),
+          canvasDataUrl: rendered.dataUrl,
+        });
+      }
     } catch (error) {
       warnings.push(`${file.name}: ${error instanceof Error ? error.message : 'Could not parse DICOM file.'}`);
     }

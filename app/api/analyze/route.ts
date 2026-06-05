@@ -28,6 +28,40 @@ const analyzeSchema = z.object({
   })).min(1).max(8),
 });
 
+type AiProvider = 'openai' | 'groq';
+
+type ProviderConfig = {
+  provider: AiProvider;
+  apiKey?: string;
+  model: string;
+  baseURL?: string;
+  maxImages: number;
+};
+
+function providerConfig(): ProviderConfig {
+  const configuredProvider = process.env.AI_PROVIDER?.toLowerCase();
+  const provider: AiProvider = configuredProvider === 'groq' || (!configuredProvider && process.env.GROQ_API_KEY && !process.env.OPENAI_API_KEY)
+    ? 'groq'
+    : 'openai';
+
+  if (provider === 'groq') {
+    return {
+      provider,
+      apiKey: process.env.GROQ_API_KEY,
+      model: process.env.GROQ_MODEL ?? process.env.AI_MODEL ?? 'meta-llama/llama-4-scout-17b-16e-instruct',
+      baseURL: 'https://api.groq.com/openai/v1',
+      maxImages: 5,
+    };
+  }
+
+  return {
+    provider,
+    apiKey: process.env.OPENAI_API_KEY,
+    model: process.env.OPENAI_MODEL ?? process.env.AI_MODEL ?? 'gpt-4.1',
+    maxImages: 8,
+  };
+}
+
 function fallbackAnalysis(reason: string): AiAnalysis {
   return {
     summary: 'AI image review is not configured yet, but the viewer can still organize series, show slices, and capture annotations/questions for your clinician.',
@@ -39,7 +73,7 @@ function fallbackAnalysis(reason: string): AiAnalysis {
         plainLanguage: reason,
         whyItMatters: 'A medical-image explanation should be generated only when a trusted model is configured and the user understands the limits.',
         confidence: 'low',
-        suggestedFollowUp: 'Add OPENAI_API_KEY in Vercel project settings, optionally set AI_MODEL, then rerun analysis.',
+        suggestedFollowUp: 'Set AI_PROVIDER=groq with GROQ_API_KEY, or set AI_PROVIDER=openai with OPENAI_API_KEY, then rerun analysis.',
       },
     ],
     questionsForDoctor: [
@@ -71,14 +105,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: body.error.flatten() }, { status: 400 });
   }
 
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json({ analysis: fallbackAnalysis('OPENAI_API_KEY is missing, so the app returned safe placeholder guidance instead of image interpretation.') });
+  const config = providerConfig();
+  if (!config.apiKey) {
+    const keyName = config.provider === 'groq' ? 'GROQ_API_KEY' : 'OPENAI_API_KEY';
+    return NextResponse.json({ analysis: fallbackAnalysis(`${keyName} is missing for AI_PROVIDER=${config.provider}, so the app returned safe placeholder guidance instead of image interpretation.`) });
   }
 
-  const model = process.env.AI_MODEL ?? 'gpt-4.1';
-  const client = new OpenAI({ apiKey });
+  const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseURL });
   const payload = body.data;
+  const images = payload.images.slice(0, config.maxImages);
 
   const userText = [
     'Explain this ankle/foot MRI series for an educated patient without making a diagnosis.',
@@ -92,15 +127,39 @@ export async function POST(request: NextRequest) {
   ].join('\n');
 
   try {
+    if (config.provider === 'groq') {
+      const response = await client.chat.completions.create({
+        model: config.model,
+        messages: [
+          { role: 'system', content: aiSystemPrompt },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: userText },
+              ...images.map((image) => ({
+                type: 'image_url' as const,
+                image_url: { url: image.dataUrl },
+              })),
+            ],
+          },
+        ],
+        temperature: 0.2,
+        max_completion_tokens: 1800,
+        response_format: { type: 'json_object' },
+      });
+
+      return NextResponse.json({ analysis: extractJson(response.choices[0]?.message.content ?? '{}') });
+    }
+
     const response = await client.responses.create({
-      model,
+      model: config.model,
       input: [
         { role: 'system', content: aiSystemPrompt },
         {
           role: 'user',
           content: [
             { type: 'input_text', text: userText },
-            ...payload.images.map((image) => ({
+            ...images.map((image) => ({
               type: 'input_image' as const,
               image_url: image.dataUrl,
               detail: 'high' as const,
@@ -112,11 +171,10 @@ export async function POST(request: NextRequest) {
       max_output_tokens: 1800,
     });
 
-    const output = response.output_text;
-    return NextResponse.json({ analysis: extractJson(output) });
+    return NextResponse.json({ analysis: extractJson(response.output_text) });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'The AI provider failed to analyze the series.' },
+      { error: error instanceof Error ? error.message : `${config.provider} failed to analyze the series.` },
       { status: 502 },
     );
   }
