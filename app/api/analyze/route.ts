@@ -51,11 +51,18 @@ const analyzeSchema = z.object({
     sliceIndex: z.number(),
     fileName: z.string(),
     instanceNumber: z.number(),
-    dataUrl: z.string().startsWith('data:image/png;base64,'),
+    dataUrl: z.string().regex(/^data:image\/(png|jpe?g|webp);base64,/),
   })).min(1).max(24),
 });
 
 type AiProvider = 'openai' | 'groq';
+
+class AiResponseFormatError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AiResponseFormatError';
+  }
+}
 
 type ProviderConfig = {
   provider: AiProvider;
@@ -133,13 +140,115 @@ function fallbackAnalysis(reason: string): AiAnalysis {
   };
 }
 
-function extractJson(text: string): AiAnalysis {
-  const fenced = text.match(/```json\s*([\s\S]*?)```/i)?.[1];
-  const objectStart = text.indexOf('{');
-  const objectEnd = text.lastIndexOf('}');
-  const raw = fenced ?? (objectStart >= 0 && objectEnd > objectStart ? text.slice(objectStart, objectEnd + 1) : '{}');
-  const parsed = JSON.parse(raw);
-  const result = aiAnalysisSchema.parse(parsed);
+const aiAnalysisJsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['summary', 'safetyNotice', 'structuresChecklist', 'findings', 'questionsForDoctor', 'limitations', 'referencedAnnotations'],
+  properties: {
+    summary: { type: 'string' },
+    safetyNotice: { type: 'string' },
+    structuresChecklist: { type: 'array', items: { type: 'string' } },
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['region', 'plainLanguage', 'whyItMatters', 'confidence', 'suggestedFollowUp', 'references'],
+        properties: {
+          region: { type: 'string' },
+          plainLanguage: { type: 'string' },
+          whyItMatters: { type: 'string' },
+          confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+          suggestedFollowUp: { type: 'string' },
+          references: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['seriesId', 'seriesDescription', 'sliceIndex', 'fileName', 'instanceNumber', 'label'],
+              properties: {
+                seriesId: { type: 'string' },
+                seriesDescription: { type: 'string' },
+                sliceIndex: { type: 'number' },
+                fileName: { type: 'string' },
+                instanceNumber: { type: 'number' },
+                label: { type: 'string' },
+                x: { type: 'number', minimum: 0, maximum: 100 },
+                y: { type: 'number', minimum: 0, maximum: 100 },
+                width: { type: 'number', minimum: 0, maximum: 100 },
+                height: { type: 'number', minimum: 0, maximum: 100 },
+              },
+            },
+          },
+        },
+      },
+    },
+    questionsForDoctor: { type: 'array', items: { type: 'string' } },
+    limitations: { type: 'array', items: { type: 'string' } },
+    referencedAnnotations: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['label', 'note', 'sliceIndex', 'seriesId', 'x', 'y'],
+        properties: {
+          id: { type: 'string' },
+          label: { type: 'string' },
+          note: { type: 'string' },
+          sliceIndex: { type: 'number' },
+          seriesId: { type: 'string' },
+          x: { type: 'number' },
+          y: { type: 'number' },
+          width: { type: 'number' },
+          height: { type: 'number' },
+          color: { type: 'string' },
+          source: { type: 'string', enum: ['user', 'ai'] },
+        },
+      },
+    },
+  },
+} as const;
+
+function extractFirstJsonObject(text: string): string | null {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+  if (fenced?.startsWith('{')) return fenced;
+
+  const start = text.indexOf('{');
+  if (start < 0) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = inString;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+    if (char === '{') depth += 1;
+    if (char === '}') depth -= 1;
+    if (depth === 0) return text.slice(start, index + 1);
+  }
+
+  return null;
+}
+
+function parseAiAnalysis(value: unknown): AiAnalysis {
+  const result = aiAnalysisSchema.parse(value);
   return {
     ...result,
     findings: result.findings as AiFinding[],
@@ -147,11 +256,43 @@ function extractJson(text: string): AiAnalysis {
   };
 }
 
-export async function POST(request: NextRequest) {
-  const body = analyzeSchema.safeParse(await request.json());
+function extractJson(text: string): AiAnalysis {
+  const raw = extractFirstJsonObject(text);
+  if (!raw) {
+    throw new AiResponseFormatError('The AI provider returned text instead of the required JSON analysis. Try again, or switch to a model that supports JSON/structured output.');
+  }
+
+  try {
+    return parseAiAnalysis(JSON.parse(raw));
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      throw new AiResponseFormatError(`The AI provider returned JSON, but it did not match the ReadMRI analysis format: ${error.issues.map((issue) => issue.path.join('.') || 'root').join(', ')}`);
+    }
+
+    throw new AiResponseFormatError('The AI provider returned malformed JSON instead of a valid ReadMRI analysis. Try again, or switch to a model with JSON/structured-output support.');
+  }
+}
+
+async function readAnalyzeRequest(request: NextRequest): Promise<z.infer<typeof analyzeSchema> | NextResponse> {
+  let json: unknown;
+
+  try {
+    json = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'The analysis request body was not valid JSON.' }, { status: 400 });
+  }
+
+  const body = analyzeSchema.safeParse(json);
   if (!body.success) {
     return NextResponse.json({ error: body.error.flatten() }, { status: 400 });
   }
+
+  return body.data;
+}
+
+export async function POST(request: NextRequest) {
+  const payload = await readAnalyzeRequest(request);
+  if (payload instanceof NextResponse) return payload;
 
   const config = providerConfig();
   if (!config.apiKey) {
@@ -160,7 +301,6 @@ export async function POST(request: NextRequest) {
   }
 
   const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseURL });
-  const payload = body.data;
   const images = payload.images.slice(0, config.maxImages);
   const validImageReferences = images.map(({ dataUrl, ...image }) => image);
 
@@ -238,6 +378,14 @@ export async function POST(request: NextRequest) {
       ],
       temperature: 0.2,
       max_output_tokens: 2400,
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'readmri_analysis',
+          description: 'Patient-friendly educational ankle/foot MRI analysis with slice references and safety limitations.',
+          schema: aiAnalysisJsonSchema,
+        },
+      },
     });
 
     return NextResponse.json({ analysis: extractJson(response.output_text) });

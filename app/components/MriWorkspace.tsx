@@ -14,6 +14,8 @@ import type { AiAnalysis, AiImageReference, Annotation, DicomSeries, DicomSlice 
 const annotationColors = ['#38bdf8', '#f97316', '#a3e635', '#f472b6', '#facc15'];
 const AI_COLOR = '#facc15';
 const MAX_CLIENT_IMAGES = 24;
+const MAX_AI_IMAGE_SIDE = 768;
+const AI_IMAGE_JPEG_QUALITY = 0.82;
 
 function promptVideoFrameOptions(videoCount: number): VideoFrameOptions {
   const frameCountInput = window.prompt(
@@ -31,6 +33,61 @@ function promptVideoFrameOptions(videoCount: number): VideoFrameOptions {
   if (!Number.isFinite(fps) || fps <= 0) throw new Error('Video FPS must be a positive number.');
 
   return { frameCount, fps };
+}
+
+async function readJsonResponse(response: Response): Promise<unknown> {
+  const contentType = response.headers.get('content-type') ?? '';
+  const text = await response.text();
+
+  if (!text.trim()) return {};
+
+  if (!contentType.includes('application/json')) {
+    throw new Error(response.ok
+      ? 'The AI service returned a non-JSON response.'
+      : `The AI service returned ${response.status} ${response.statusText || 'error'} instead of JSON. ${text.slice(0, 180)}`);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error('The AI service returned malformed JSON. Please try again; if it keeps happening, check the server logs and configured AI model.');
+  }
+}
+
+function getAnalyzeError(json: unknown): string {
+  if (json && typeof json === 'object' && 'error' in json) {
+    const error = (json as { error?: unknown }).error;
+    if (typeof error === 'string') return error;
+    if (error) return JSON.stringify(error);
+  }
+
+  return 'AI analysis failed.';
+}
+
+function getAnalyzeResult(json: unknown): AiAnalysis {
+  if (json && typeof json === 'object' && 'analysis' in json) {
+    return (json as { analysis: AiAnalysis }).analysis;
+  }
+
+  throw new Error('The AI service response did not include an analysis result.');
+}
+
+async function makeAiImageDataUrl(sourceDataUrl: string): Promise<string> {
+  const image = new Image();
+  image.src = sourceDataUrl;
+  await image.decode();
+
+  const scale = Math.min(1, MAX_AI_IMAGE_SIDE / Math.max(image.naturalWidth, image.naturalHeight));
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Canvas rendering is not available for AI image preparation.');
+
+  context.drawImage(image, 0, 0, width, height);
+  return canvas.toDataURL('image/jpeg', AI_IMAGE_JPEG_QUALITY);
 }
 
 function createDefaultAnalysis(): AiAnalysis {
@@ -314,6 +371,7 @@ export default function MriWorkspace() {
     setError('');
     setAnalysisStatus(`Sending ${sampledImages.length} image reference${sampledImages.length === 1 ? '' : 's'} to AI...`);
     try {
+      const aiImageDataUrls = await Promise.all(sampledImages.map(({ slice }) => makeAiImageDataUrl(slice.canvasDataUrl)));
       const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -341,13 +399,13 @@ export default function MriWorkspace() {
             sliceIndex: imageSliceIndex,
             fileName: slice.fileName,
             instanceNumber: slice.instanceNumber,
-            dataUrl: slice.canvasDataUrl,
+            dataUrl: aiImageDataUrls[imageIndex],
           })),
         }),
       });
-      const json = await response.json();
-      if (!response.ok) throw new Error(typeof json.error === 'string' ? json.error : 'AI analysis failed.');
-      const nextAnalysis = json.analysis as AiAnalysis;
+      const json = await readJsonResponse(response);
+      if (!response.ok) throw new Error(getAnalyzeError(json));
+      const nextAnalysis = getAnalyzeResult(json);
       const normalizedAiAnnotations = (nextAnalysis.referencedAnnotations ?? []).map((annotation, index) => ({
         ...annotation,
         id: annotation.id || `ai-${Date.now()}-${index}`,
