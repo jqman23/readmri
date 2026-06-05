@@ -74,7 +74,7 @@ export default function MriWorkspace() {
       setSliceIndex(0);
       setAnnotations([]);
       if (!result.series.length) {
-        setError('No readable image slices were found. The upload opened, but the files with no image dimensions are usually DICOMDIR/index files, reports, presentation states, PDFs, or an incomplete CD export—not the actual slice images. For the portal in your screenshots, download the whole series/study ZIP, keep the full folder structure, and if the Advanced options let you choose it, enable Preferred Transfer Syntax → Explicit VR Little Endian before downloading.');
+        setError('No readable MRI slices were found. Select the folder/CD that contains the actual DICOM image files (often extensionless files inside series folders), or upload the exported .zip/.tar/.tgz archive.');
       }
     } catch (parseError) {
       setError(parseError instanceof Error ? parseError.message : 'Unable to parse those DICOM files.');
