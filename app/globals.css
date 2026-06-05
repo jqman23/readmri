@@ -53,11 +53,13 @@ textarea { min-height: 88px; resize: vertical; }
 .badge { background: rgba(148, 163, 184, 0.14); border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: #cbd5e1; font-size: 0.8rem; }
 .imageStage { min-height: 560px; display: grid; place-items: center; background: #020617; border-radius: 18px; position: relative; overflow: hidden; cursor: crosshair; }
 .imageStage img { max-width: 100%; max-height: 72vh; object-fit: contain; image-rendering: pixelated; user-select: none; }
-.pin { position: absolute; transform: translate(-50%, -50%); border: 2px solid; width: 18px; height: 18px; border-radius: 999px; box-shadow: 0 0 0 9999px rgba(0,0,0,0.01); }
+.pin { position: absolute; transform: translate(-50%, -50%); border: 2px solid; width: 18px; height: 18px; border-radius: 999px; box-shadow: 0 0 0 9999px rgba(0,0,0,0.01); cursor: grab; touch-action: none; }
+.pin:active { cursor: grabbing; }
 .pin span { position: absolute; left: 14px; top: -12px; white-space: nowrap; color: #020617; font-size: 0.72rem; font-weight: 900; padding: 4px 7px; border-radius: 999px; }
 .empty { min-height: 620px; display: grid; place-items: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 18px; }
 
 .notice { border-left: 3px solid var(--danger); padding-left: 12px; color: #fecdd3; }
+.analysisStatus { border: 1px solid rgba(56, 189, 248, 0.28); border-radius: 12px; background: rgba(56, 189, 248, 0.08); color: #bae6fd; font-weight: 800; padding: 10px 12px; }
 .finding { padding: 14px; border: 1px solid var(--line); border-radius: 16px; margin-bottom: 12px; background: rgba(15, 23, 42, 0.75); }
 .finding strong { display: flex; justify-content: space-between; gap: 12px; }
 .finding span { color: var(--brand); font-size: 0.78rem; text-transform: uppercase; }
@@ -91,7 +93,9 @@ li { margin: 8px 0; }
 .aiPin { border-radius: 8px; background: rgba(250, 204, 21, 0.12); min-width: 20px; min-height: 20px; }
 .aiPin span { border-radius: 8px; }
 .annotationList { display: grid; gap: 8px; margin-top: 14px; }
+.annotationItem { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: stretch; }
 .annotationList button, .references button { border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 12px; background: rgba(15, 23, 42, 0.8); color: #dbeafe; cursor: pointer; padding: 9px 10px; text-align: left; }
+.annotationList .deleteAnnotation { border-color: rgba(251, 113, 133, 0.45); color: #fecdd3; font-weight: 900; text-align: center; }
 .annotationList small { display: block; color: var(--muted); margin-top: 3px; }
 .references { display: grid; gap: 8px; margin-top: 12px; }
 .references b { color: #bae6fd; font-size: 0.82rem; }
