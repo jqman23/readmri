@@ -45,7 +45,29 @@ const text = (dataSet: DataSet, tag: string, fallback = '') => {
 const numberValue = (dataSet: DataSet, tag: string, fallback = 0) => {
   const raw = text(dataSet, tag);
   const parsed = Number.parseFloat(raw.split('\\')[0]);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  if (Number.isFinite(parsed)) return parsed;
+
+  const numericReaders = [
+    dataSet.uint16,
+    dataSet.int16,
+    dataSet.uint32,
+    dataSet.int32,
+    dataSet.float,
+    dataSet.double,
+    dataSet.floatString,
+    dataSet.intString,
+  ];
+
+  for (const reader of numericReaders) {
+    try {
+      const value = reader.call(dataSet, tag, 0);
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+    } catch {
+      // Try the next value reader. DICOM stores numbers as different VRs.
+    }
+  }
+
+  return fallback;
 };
 
 function transferSyntaxName(transferSyntax: string) {
@@ -68,6 +90,18 @@ function sopClassName(sopClassUid: string) {
   return SOP_CLASS_NAMES[sopClassUid] ?? (sopClassUid || 'unknown DICOM object');
 }
 
+function sopClassUid(dataSet: DataSet) {
+  return text(dataSet, 'x00080016') || text(dataSet, 'x00020002');
+}
+
+function isImageStorageSop(dataSet: DataSet) {
+  const sop = sopClassUid(dataSet);
+  return sop === '1.2.840.10008.5.1.4.1.1.4'
+    || sop === '1.2.840.10008.5.1.4.1.1.4.1'
+    || sop === '1.2.840.10008.5.1.4.1.1.7'
+    || sop.startsWith('1.2.840.10008.5.1.4.1.1.');
+}
+
 function parseDicomDataSet(bytes: Uint8Array) {
   try {
     return dicomParser.parseDicom(bytes, { untilTag: undefined });
@@ -88,9 +122,8 @@ function parseDicomDataSet(bytes: Uint8Array) {
 
 function describeNonImageDicom(dataSet: DataSet) {
   const modality = text(dataSet, 'x00080060', 'unknown modality');
-  const sopClassUid = text(dataSet, 'x00080016') || text(dataSet, 'x00020002');
   const transferSyntax = text(dataSet, 'x00020010');
-  const parts = [modality, sopClassName(sopClassUid)];
+  const parts = [modality, sopClassName(sopClassUid(dataSet))];
   if (transferSyntax) parts.push(transferSyntaxName(transferSyntax));
   return parts.filter(Boolean).join(' · ');
 }
@@ -417,12 +450,18 @@ export async function parseDicomFiles(files: File[]): Promise<{ series: DicomSer
       const modality = text(dataSet, 'x00080060');
       const rows = numberValue(dataSet, 'x00280010');
       const columns = numberValue(dataSet, 'x00280011');
+      const hasPixelData = Boolean(dataSet.elements.x7fe00010);
       if (modality && modality !== 'MR') warnings.push(`${file.name}: modality is ${modality}, not MR.`);
-      if (!rows || !columns || !dataSet.elements.x7fe00010) {
+      if (!hasPixelData) {
         skippedNonImageDicom += 1;
         if (skippedNonImageDicom <= NON_IMAGE_WARNING_LIMIT) {
           warnings.push(`${file.name}: skipped non-image DICOM object (${describeNonImageDicom(dataSet)}).`);
         }
+        continue;
+      }
+      if (!rows || !columns) {
+        const objectType = isImageStorageSop(dataSet) ? 'image DICOM' : 'DICOM object';
+        warnings.push(`${file.name}: could not render ${objectType} (${describeNonImageDicom(dataSet)}) because Rows/Columns metadata is missing or invalid.`);
         continue;
       }
 
