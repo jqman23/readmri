@@ -4,7 +4,7 @@ ReadMRI is a Vercel-ready Next.js prototype for patient-friendly ankle/foot MRI 
 
 ## What it does
 
-- Imports multiple `.dcm` files in the browser and groups them by DICOM series UID.
+- Imports individual `.dcm`/extensionless DICOM files, whole study folders or mounted CD exports, and common archive formats (`.zip`, `.tar`, `.tgz`, `.gz`) in the browser before grouping slices by DICOM series UID.
 - Renders uncompressed grayscale MR slices to a canvas-backed PNG for review.
 - Lets users move through slices, switch series, and drop annotations/questions on the MRI image.
 - Sends representative rendered slices, metadata, and annotations to a server API for an AI explanation.
@@ -46,4 +46,4 @@ If `OPENAI_API_KEY` is missing, the app returns safe placeholder guidance instea
 
 ## DICOM support notes
 
-This prototype focuses on functionality and supports common uncompressed, single-channel grayscale MR DICOM files. Compressed transfer syntaxes from some scanners/PACS exports may need a server-side DICOM pipeline or a full web imaging stack such as Cornerstone plus codecs.
+This prototype focuses on functionality and supports common uncompressed, single-channel grayscale MR DICOM slices. The uploader can unpack common compressed export archives (`.zip`, `.tar`, `.tgz`, `.gz`) directly in the browser, so zipped CD/study exports can be dropped in without manually extracting them first. DICOM image slices that use compressed pixel transfer syntaxes from some scanners/PACS exports may still need a server-side DICOM pipeline or a full web imaging stack such as Cornerstone plus codecs.
