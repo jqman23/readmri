@@ -1,9 +1,10 @@
 'use client';
 
-import type { ChangeEvent, MouseEvent } from 'react';
+import type { ChangeEvent, DragEvent, MouseEvent } from 'react';
 import { useMemo, useRef, useState } from 'react';
 import { ankleChecklist, patientFriendlyGlossary } from '../lib/ankleKnowledge';
 import { parseDicomFiles } from '../lib/dicom';
+import { describeFiles, getFilesFromDataTransfer, type UploadFile } from '../lib/upload';
 import type { AiAnalysis, Annotation, DicomSeries } from '../lib/types';
 
 const annotationColors = ['#38bdf8', '#f97316', '#a3e635', '#f472b6', '#facc15'];
@@ -34,6 +35,8 @@ export default function MriWorkspace() {
   const [isParsing, setIsParsing] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string>('');
+  const [uploadSummary, setUploadSummary] = useState<string>('');
+  const [isDragOver, setIsDragOver] = useState(false);
   const imageRef = useRef<HTMLImageElement>(null);
 
   const activeSeries = useMemo(
@@ -45,23 +48,44 @@ export default function MriWorkspace() {
     (annotation) => annotation.seriesId === activeSeries?.id && annotation.sliceIndex === sliceIndex,
   );
 
-  const handleFiles = async (event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? []);
-    if (!files.length) return;
+  const loadFiles = async (incomingFiles: UploadFile[]) => {
+    const { dicomCandidates, summary } = describeFiles(incomingFiles);
+    setUploadSummary(summary);
+    if (!dicomCandidates.length) {
+      setError('No files were selected. Choose individual DICOM files or a folder that contains the MRI slices.');
+      return;
+    }
+
     setIsParsing(true);
     setError('');
+    setWarnings([]);
     try {
-      const result = await parseDicomFiles(files);
+      const result = await parseDicomFiles(dicomCandidates);
       setSeries(result.series);
       setWarnings(result.warnings);
       setActiveSeriesId(result.series[0]?.id ?? '');
       setSliceIndex(0);
-      if (!result.series.length) setError('No readable MRI slices were found. Try uncompressed DICOM files exported as individual slices.');
+      setAnnotations([]);
+      if (!result.series.length) {
+        setError('No readable MRI slices were found. Select the folder that contains the actual DICOM image files (often extensionless files inside series folders), not just a DICOMDIR/index file. Compressed DICOM transfer syntaxes are not supported in this browser viewer.');
+      }
     } catch (parseError) {
       setError(parseError instanceof Error ? parseError.message : 'Unable to parse those DICOM files.');
     } finally {
       setIsParsing(false);
     }
+  };
+
+  const handleFiles = async (event: ChangeEvent<HTMLInputElement>) => {
+    await loadFiles(Array.from(event.target.files ?? []));
+    event.target.value = '';
+  };
+
+  const handleDrop = async (event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    setIsDragOver(false);
+    const droppedFiles = await getFilesFromDataTransfer(event.dataTransfer);
+    await loadFiles(droppedFiles);
   };
 
   const addAnnotation = (event: MouseEvent<HTMLDivElement>) => {
@@ -149,10 +173,29 @@ export default function MriWorkspace() {
 
       <section className="grid">
         <aside className="card controls">
-          <label className="upload">
-            <span>{isParsing ? 'Reading DICOM…' : 'Upload DCM files'}</span>
-            <input type="file" accept=".dcm,application/dicom" multiple onChange={handleFiles} />
+          <label
+            className={`upload${isDragOver ? ' dragOver' : ''}`}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setIsDragOver(true);
+            }}
+            onDragLeave={() => setIsDragOver(false)}
+            onDrop={handleDrop}
+          >
+            <span>{isParsing ? 'Reading DICOM…' : 'Upload DICOM files or folders'}</span>
+            <small>Click to pick files, or drag a study/series folder here. Extensionless DICOM files are accepted.</small>
+            <input type="file" multiple onChange={handleFiles} />
           </label>
+          <label className="folderUpload">
+            Select a DICOM folder
+            <input
+              type="file"
+              multiple
+              onChange={handleFiles}
+              {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+            />
+          </label>
+          {uploadSummary && <p className="hint uploadSummary">{uploadSummary}</p>}
 
           <div className="field">
             <label>Series</label>
@@ -218,7 +261,7 @@ export default function MriWorkspace() {
               </div>
             </>
           ) : (
-            <div className="empty">Upload individual DICOM files from ankle/foot MRI series to begin.</div>
+            <div className="empty">Upload individual DICOM files, drag a series folder, or select all extensionless DICOM image files from your MRI export.</div>
           )}
         </section>
 

@@ -1,7 +1,15 @@
-import dicomParser from 'dicom-parser';
+import dicomParser, { type DataSet } from 'dicom-parser';
 import type { DicomSeries, DicomSlice } from './types';
 
-const text = (dataSet: dicomParser.DataSet, tag: string, fallback = '') => {
+const SUPPORTED_TRANSFER_SYNTAXES = new Set([
+  '',
+  '1.2.840.10008.1.2',
+  '1.2.840.10008.1.2.1',
+  '1.2.840.10008.1.2.1.99',
+  '1.2.840.10008.1.2.2',
+]);
+
+const text = (dataSet: DataSet, tag: string, fallback = '') => {
   try {
     return dataSet.string(tag)?.trim() || fallback;
   } catch {
@@ -9,7 +17,7 @@ const text = (dataSet: dicomParser.DataSet, tag: string, fallback = '') => {
   }
 };
 
-const numberValue = (dataSet: dicomParser.DataSet, tag: string, fallback = 0) => {
+const numberValue = (dataSet: DataSet, tag: string, fallback = 0) => {
   const raw = text(dataSet, tag);
   const parsed = Number.parseFloat(raw.split('\\')[0]);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -35,18 +43,29 @@ function detectPlane(orientation?: string, description = ''): DicomSlice['acquis
   return axis === 0 ? 'sagittal' : axis === 1 ? 'coronal' : 'axial';
 }
 
-function getPixelArray(dataSet: dicomParser.DataSet, bytes: Uint8Array, rows: number, columns: number) {
+function getPixelArray(dataSet: DataSet, bytes: Uint8Array, rows: number, columns: number) {
   const pixelElement = dataSet.elements.x7fe00010;
-  if (!pixelElement) throw new Error('No pixel data found.');
+  if (!pixelElement) throw new Error('No pixel data found. This may be a DICOMDIR/index file rather than an image slice.');
+
+  const transferSyntax = text(dataSet, 'x00020010');
+  if (!SUPPORTED_TRANSFER_SYNTAXES.has(transferSyntax)) {
+    throw new Error(`Unsupported DICOM transfer syntax (${transferSyntax}). Export uncompressed Explicit/Implicit VR DICOM slices for browser upload.`);
+  }
 
   const bitsAllocated = numberValue(dataSet, 'x00280100', 16);
   const pixelRepresentation = numberValue(dataSet, 'x00280103', 0);
   const samplesPerPixel = numberValue(dataSet, 'x00280002', 1);
   if (samplesPerPixel !== 1) throw new Error('Only single-channel grayscale MRI slices are supported in this viewer.');
+  if (![8, 16].includes(bitsAllocated)) throw new Error(`Unsupported ${bitsAllocated}-bit pixel data. Export 8-bit or 16-bit uncompressed DICOM slices.`);
 
   const count = rows * columns;
   const start = pixelElement.dataOffset;
   const littleEndian = !text(dataSet, 'x00020010').includes('1.2.840.10008.1.2.2');
+  const expectedBytes = count * (bitsAllocated <= 8 ? 1 : 2);
+  if (pixelElement.length < expectedBytes) {
+    throw new Error('Pixel data is shorter than expected for this slice. It may be compressed or truncated.');
+  }
+
   const view = new DataView(bytes.buffer, bytes.byteOffset + start, pixelElement.length);
   const pixels = new Float32Array(count);
 
@@ -64,7 +83,7 @@ function getPixelArray(dataSet: dicomParser.DataSet, bytes: Uint8Array, rows: nu
   return pixels;
 }
 
-function renderDataUrl(dataSet: dicomParser.DataSet, bytes: Uint8Array, rows: number, columns: number) {
+function renderDataUrl(dataSet: DataSet, bytes: Uint8Array, rows: number, columns: number) {
   const pixels = getPixelArray(dataSet, bytes, rows, columns);
   const slope = numberValue(dataSet, 'x00281053', 1);
   const intercept = numberValue(dataSet, 'x00281052', 0);
