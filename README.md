@@ -12,7 +12,9 @@ ReadMRI is a Vercel-ready Next.js prototype for patient-friendly ankle/foot MRI 
 
 ## AI choice
 
-The app defaults to OpenAI `gpt-4.1` because it has strong API vision support, structured output reliability, and is easy to deploy on Vercel using a single serverless route. The model is configurable with `AI_MODEL` so you can test future medical-imaging-capable models without changing the UI.
+The app can use either Groq or OpenAI through server-side environment variables. Groq is a good low-cost/free-limit option when an OpenAI key returns quota errors; set `AI_PROVIDER=groq`, `GROQ_API_KEY`, and optionally `GROQ_MODEL`. OpenAI remains supported with `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and optionally `OPENAI_MODEL`.
+
+The default Groq vision model is `meta-llama/llama-4-scout-17b-16e-instruct`; the default OpenAI model is `gpt-4.1`. You can also use the backward-compatible `AI_MODEL` variable if a provider-specific model is not set.
 
 Important: current general-purpose multimodal models are not approved replacements for radiologists and should not be used as autonomous diagnostic systems.
 
@@ -25,7 +27,7 @@ npm run dev
 
 ## Environment variables
 
-Never hardcode or commit a real OpenAI API key, even if the GitHub repository is private. Keep the key in local environment variables or your deployment provider secret settings so it can be rotated without code changes.
+Never hardcode or commit a real OpenAI or Groq API key, even if the GitHub repository is private. Keep the key in local environment variables or your deployment provider secret settings so it can be rotated without code changes.
 
 For local development, copy the example file and add your real key only to `.env.local`:
 
@@ -33,16 +35,25 @@ For local development, copy the example file and add your real key only to `.env
 cp .env.example .env.local
 ```
 
-Then edit `.env.local`:
+Then edit `.env.local`. For Groq, use:
 
 ```bash
-OPENAI_API_KEY=sk-your-real-key
-AI_MODEL=gpt-4.1
+AI_PROVIDER=groq
+GROQ_API_KEY=gsk-your-real-groq-key
+GROQ_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
 ```
 
-For Vercel, set `OPENAI_API_KEY` and optional `AI_MODEL` in Project Settings → Environment Variables.
+For OpenAI, use:
 
-If `OPENAI_API_KEY` is missing, the app returns safe placeholder guidance instead of pretending to interpret images.
+```bash
+AI_PROVIDER=openai
+OPENAI_API_KEY=sk-your-real-openai-key
+OPENAI_MODEL=gpt-4.1
+```
+
+If `AI_PROVIDER` is omitted, the server uses Groq when only `GROQ_API_KEY` is present; otherwise it uses OpenAI. For Vercel, add the same variables in Project Settings → Environment Variables.
+
+If the selected provider key is missing, the app returns safe placeholder guidance instead of pretending to interpret images.
 
 ## DICOM support notes
 
