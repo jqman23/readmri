@@ -4,8 +4,8 @@ ReadMRI is a Vercel-ready Next.js prototype for patient-friendly ankle/foot MRI 
 
 ## What it does
 
-- Imports individual `.dcm`/extensionless DICOM files, whole study folders or mounted CD exports, and common archive formats (`.zip`, `.tar`, `.tgz`, `.gz`) in the browser before grouping slices by DICOM series UID.
-- Renders uncompressed grayscale MR slices to a canvas-backed PNG for review.
+- Imports individual `.dcm`/extensionless DICOM files, MP4/video exports, whole study folders or mounted CD exports, and common archive formats (`.zip`, `.tar`, `.tgz`, `.gz`) in the browser before grouping slices by DICOM series UID or video-derived frame sequence.
+- Renders uncompressed grayscale MR slices and browser-decoded video frames to canvas-backed PNGs for review.
 - Lets users move through slices, switch series, and drop annotations/questions on the MRI image.
 - Sends representative rendered slices, metadata, and annotations to a server API for an AI explanation.
 - Keeps the AI response educational: it must state limitations, avoid diagnosis, and generate questions for a clinician.
@@ -46,4 +46,4 @@ If `OPENAI_API_KEY` is missing, the app returns safe placeholder guidance instea
 
 ## DICOM support notes
 
-This prototype focuses on functionality and supports common uncompressed, single-channel grayscale MR DICOM slices. The uploader can unpack common compressed export archives (`.zip`, `.tar`, `.tgz`, `.gz`) directly in the browser, so zipped CD/study exports can be dropped in without manually extracting them first. DICOM image slices that use compressed pixel transfer syntaxes from some scanners/PACS exports may still need a server-side DICOM pipeline or a full web imaging stack such as Cornerstone plus codecs.
+This prototype focuses on functionality and supports common uncompressed, single-channel grayscale MR DICOM slices. The uploader can also import MP4/M4V/MOV/WebM video exports; when video files are selected, the browser prompts for the number of frames/slices to extract and the FPS step to use (for example, 50 frames at 20 FPS). The uploader can unpack common compressed export archives (`.zip`, `.tar`, `.tgz`, `.gz`) directly in the browser, so zipped CD/study exports can be dropped in without manually extracting them first. DICOM image slices that use compressed pixel transfer syntaxes from some scanners/PACS exports may still need a server-side DICOM pipeline or a full web imaging stack such as Cornerstone plus codecs.
