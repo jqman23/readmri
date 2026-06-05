@@ -22,6 +22,28 @@ type DataTransferItemWithEntry = DataTransferItem & {
   webkitGetAsEntry?: () => unknown;
 };
 
+const DICOM_EXTENSIONS = new Set(['.dcm', '.dicom', '.ima']);
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.m4v', '.mov']);
+const KNOWN_NON_DICOM_EXTENSIONS = new Set([
+  '.bmp',
+  '.css',
+  '.dll',
+  '.exe',
+  '.gif',
+  '.htm',
+  '.html',
+  '.ini',
+  '.jpeg',
+  '.jpg',
+  '.js',
+  '.json',
+  '.pdf',
+  '.png',
+  '.rtf',
+  '.txt',
+  '.xml',
+]);
+
 function isDirectoryEntry(entry: LegacyFileSystemEntry): entry is LegacyFileSystemDirectoryEntry {
   return entry.isDirectory;
 }
@@ -73,9 +95,74 @@ export async function getFilesFromDataTransfer(dataTransfer: DataTransfer): Prom
   return files.flat();
 }
 
-export function describeFiles(files: UploadFile[]) {
-  const dicomCandidates = files.filter((file) => file.size > 0);
-  const skipped = files.length - dicomCandidates.length;
+function uploadPath(file: UploadFile) {
+  return file.webkitRelativePath || file.name;
+}
+
+function extensionOf(file: UploadFile) {
+  const name = uploadPath(file).toLowerCase();
+  const lastSegment = name.split('/').pop() || name;
+  const dotIndex = lastSegment.lastIndexOf('.');
+  return dotIndex >= 0 ? lastSegment.slice(dotIndex) : '';
+}
+
+
+export function isVideoFile(file: UploadFile) {
+  const extension = extensionOf(file);
+  return VIDEO_EXTENSIONS.has(extension) || file.type.startsWith('video/');
+}
+
+export function splitUploadFiles(files: UploadFile[]) {
+  const videoFiles: UploadFile[] = [];
+  const otherFiles: UploadFile[] = [];
+
+  for (const file of files) {
+    if (isVideoFile(file)) videoFiles.push(file);
+    else otherFiles.push(file);
+  }
+
+  return { videoFiles, otherFiles };
+}
+
+async function hasDicomPreamble(file: UploadFile) {
+  if (file.size < 132) return false;
+  const header = new Uint8Array(await file.slice(128, 132).arrayBuffer());
+  return header[0] === 0x44 && header[1] === 0x49 && header[2] === 0x43 && header[3] === 0x4d;
+}
+
+export async function getDicomCandidateFiles(files: UploadFile[]): Promise<{ dicomCandidates: UploadFile[]; skippedNonDicom: number }> {
+  const candidates: UploadFile[] = [];
+  let skippedNonDicom = 0;
+
+  for (const file of files) {
+    if (file.size === 0) continue;
+
+    const extension = extensionOf(file);
+    if (DICOM_EXTENSIONS.has(extension) || await hasDicomPreamble(file)) {
+      candidates.push(file);
+      continue;
+    }
+
+    if (!extension || /(^|\/)dicom(dir)?$/i.test(uploadPath(file))) {
+      candidates.push(file);
+      continue;
+    }
+
+    if (KNOWN_NON_DICOM_EXTENSIONS.has(extension)) {
+      skippedNonDicom += 1;
+      continue;
+    }
+
+    candidates.push(file);
+  }
+
+  return { dicomCandidates: candidates, skippedNonDicom };
+}
+
+export function describeFiles(files: UploadFile[], dicomCandidateCount?: number, archiveCount = 0, skippedNonDicom = 0, videoCount = 0) {
+  const nonEmpty = files.filter((file) => file.size > 0);
+  const skippedEmpty = files.length - nonEmpty.length;
+  const selectedCount = dicomCandidateCount ?? nonEmpty.length;
   const folderCount = new Set(
     files
       .map((file) => file.webkitRelativePath?.split('/').slice(0, -1).join('/'))
@@ -83,7 +170,6 @@ export function describeFiles(files: UploadFile[]) {
   ).size;
 
   return {
-    dicomCandidates,
-    summary: `${dicomCandidates.length.toLocaleString()} file${dicomCandidates.length === 1 ? '' : 's'} selected${folderCount ? ` from ${folderCount.toLocaleString()} folder${folderCount === 1 ? '' : 's'}` : ''}${skipped ? ` (${skipped.toLocaleString()} empty skipped)` : ''}.`,
+    summary: `${selectedCount.toLocaleString()} DICOM candidate${selectedCount === 1 ? '' : 's'} selected${folderCount ? ` from ${folderCount.toLocaleString()} folder${folderCount === 1 ? '' : 's'}` : ''}${archiveCount ? ` after unpacking ${archiveCount.toLocaleString()} archive${archiveCount === 1 ? '' : 's'}` : ''}${videoCount ? ` plus ${videoCount.toLocaleString()} video file${videoCount === 1 ? '' : 's'}` : ''}${skippedNonDicom ? ` (${skippedNonDicom.toLocaleString()} viewer/document file${skippedNonDicom === 1 ? '' : 's'} skipped)` : ''}${skippedEmpty ? ` (${skippedEmpty.toLocaleString()} empty skipped)` : ''}.`,
   };
 }
