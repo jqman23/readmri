@@ -1,6 +1,6 @@
 'use client';
 
-import type { ChangeEvent, DragEvent, MouseEvent } from 'react';
+import type { ChangeEvent, DragEvent, MouseEvent, PointerEvent } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ankleChecklist, patientFriendlyGlossary } from '../lib/ankleKnowledge';
 import { expandUploadFiles } from '../lib/archives';
@@ -88,9 +88,11 @@ export default function MriWorkspace() {
   const [isHydrated, setIsHydrated] = useState(false);
   const [storageMessage, setStorageMessage] = useState('');
   const [error, setError] = useState<string>('');
+  const [analysisStatus, setAnalysisStatus] = useState('');
   const [uploadSummary, setUploadSummary] = useState<string>('');
   const [isDragOver, setIsDragOver] = useState(false);
   const imageRef = useRef<HTMLImageElement>(null);
+  const draggedAnnotationIdRef = useRef<string | null>(null);
 
   const activeSeries = useMemo(
     () => series.find((item) => item.id === activeSeriesId) ?? series[0],
@@ -212,18 +214,25 @@ export default function MriWorkspace() {
     await loadFiles(droppedFiles);
   };
 
-  const addAnnotation = (event: MouseEvent<HTMLDivElement>) => {
-    if (!activeSlice || !activeSeries || !imageRef.current) return;
+  const imageCoordinatesFromPointer = (clientX: number, clientY: number) => {
+    if (!imageRef.current) return null;
     const bounds = imageRef.current.getBoundingClientRect();
-    const x = ((event.clientX - bounds.left) / bounds.width) * 100;
-    const y = ((event.clientY - bounds.top) / bounds.height) * 100;
-    if (x < 0 || x > 100 || y < 0 || y > 100) return;
+    const x = ((clientX - bounds.left) / bounds.width) * 100;
+    const y = ((clientY - bounds.top) / bounds.height) * 100;
+    if (x < 0 || x > 100 || y < 0 || y > 100) return null;
+    return { x, y };
+  };
+
+  const addAnnotation = (event: MouseEvent<HTMLDivElement>) => {
+    if (!activeSlice || !activeSeries) return;
+    const coordinates = imageCoordinatesFromPointer(event.clientX, event.clientY);
+    if (!coordinates) return;
     setAnnotations((existing) => [
       ...existing,
       {
         id: crypto.randomUUID(),
-        x,
-        y,
+        x: coordinates.x,
+        y: coordinates.y,
         label: annotationDraft.label || 'Annotation',
         note: annotationDraft.note,
         color: annotationColors[existing.length % annotationColors.length],
@@ -232,6 +241,45 @@ export default function MriWorkspace() {
         source: 'user',
       },
     ]);
+  };
+
+  const moveAnnotation = (annotationId: string, clientX: number, clientY: number) => {
+    const coordinates = imageCoordinatesFromPointer(clientX, clientY);
+    if (!coordinates) return;
+    setAnnotations((existing) => existing.map((annotation) => (annotation.id === annotationId ? { ...annotation, ...coordinates } : annotation)));
+    setAnalysis((existing) => ({
+      ...existing,
+      referencedAnnotations: existing.referencedAnnotations.map((annotation) => (annotation.id === annotationId ? { ...annotation, ...coordinates } : annotation)),
+    }));
+  };
+
+  const startMovingAnnotation = (event: PointerEvent<HTMLDivElement>, annotationId: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    draggedAnnotationIdRef.current = annotationId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const continueMovingAnnotation = (event: PointerEvent<HTMLDivElement>, annotationId: string) => {
+    if (draggedAnnotationIdRef.current !== annotationId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    moveAnnotation(annotationId, event.clientX, event.clientY);
+  };
+
+  const stopMovingAnnotation = (event: PointerEvent<HTMLDivElement>) => {
+    if (!draggedAnnotationIdRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    draggedAnnotationIdRef.current = null;
+  };
+
+  const deleteAnnotation = (annotationId: string) => {
+    setAnnotations((existing) => existing.filter((annotation) => annotation.id !== annotationId));
+    setAnalysis((existing) => ({
+      ...existing,
+      referencedAnnotations: existing.referencedAnnotations.filter((annotation) => annotation.id !== annotationId),
+    }));
   };
 
   const jumpToReference = (reference: Pick<AiImageReference, 'seriesId' | 'sliceIndex'>) => {
@@ -251,6 +299,7 @@ export default function MriWorkspace() {
     setSelectedSeriesIds([]);
     setAnnotations([]);
     setAnalysis(createDefaultAnalysis());
+    setAnalysisStatus('');
     setUploadSummary('');
     setStorageMessage('Cleared locally saved browser study data.');
   };
@@ -263,6 +312,7 @@ export default function MriWorkspace() {
     if (!selectedSeries.length || !sampledImages.length) return;
     setIsAnalyzing(true);
     setError('');
+    setAnalysisStatus(`Sending ${sampledImages.length} image reference${sampledImages.length === 1 ? '' : 's'} to AI...`);
     try {
       const response = await fetch('/api/analyze', {
         method: 'POST',
@@ -296,20 +346,27 @@ export default function MriWorkspace() {
         }),
       });
       const json = await response.json();
-      if (!response.ok) throw new Error(json.error ?? 'AI analysis failed.');
+      if (!response.ok) throw new Error(typeof json.error === 'string' ? json.error : 'AI analysis failed.');
       const nextAnalysis = json.analysis as AiAnalysis;
-      setAnalysis(nextAnalysis);
+      const normalizedAiAnnotations = (nextAnalysis.referencedAnnotations ?? []).map((annotation, index) => ({
+        ...annotation,
+        id: annotation.id || `ai-${Date.now()}-${index}`,
+        color: annotation.color || AI_COLOR,
+        source: 'ai' as const,
+      }));
+      const normalizedAnalysis = { ...nextAnalysis, referencedAnnotations: normalizedAiAnnotations };
+      setAnalysis(normalizedAnalysis);
+      setAnalysisStatus(normalizedAnalysis.limitations?.some((limitation) => limitation.includes('No configured AI model'))
+        ? 'AI is not configured yet, so ReadMRI showed safe placeholder guidance instead of image interpretation.'
+        : `AI analysis complete for ${sampledImages.length} image reference${sampledImages.length === 1 ? '' : 's'}.`);
       setAnnotations((existing) => [
         ...existing.filter((annotation) => annotation.source !== 'ai'),
-        ...(nextAnalysis.referencedAnnotations ?? []).map((annotation, index) => ({
-          ...annotation,
-          id: annotation.id || `ai-${Date.now()}-${index}`,
-          color: annotation.color || AI_COLOR,
-          source: 'ai' as const,
-        })),
+        ...normalizedAiAnnotations,
       ]);
     } catch (analysisError) {
-      setError(analysisError instanceof Error ? analysisError.message : 'AI analysis failed.');
+      const message = analysisError instanceof Error ? analysisError.message : 'AI analysis failed.';
+      setError(message);
+      setAnalysisStatus(`AI request failed: ${message}`);
     } finally {
       setIsAnalyzing(false);
     }
@@ -447,7 +504,12 @@ export default function MriWorkspace() {
                       height: annotation.height ? `${annotation.height}%` : undefined,
                       borderColor: annotation.color,
                     }}
-                    title={annotation.note}
+                    title={annotation.note || 'Drag to move this annotation.'}
+                    onPointerDown={(event) => startMovingAnnotation(event, annotation.id)}
+                    onPointerMove={(event) => continueMovingAnnotation(event, annotation.id)}
+                    onPointerUp={stopMovingAnnotation}
+                    onPointerCancel={stopMovingAnnotation}
+                    onClick={(event) => event.stopPropagation()}
                   >
                     <span style={{ background: annotation.color }}>{annotation.label}</span>
                   </div>
@@ -456,10 +518,13 @@ export default function MriWorkspace() {
               {visibleAnnotations.length > 0 && (
                 <div className="annotationList">
                   {visibleAnnotations.map((annotation) => (
-                    <button key={annotation.id} type="button" onClick={() => jumpToReference({ seriesId: annotation.seriesId, sliceIndex: annotation.sliceIndex })}>
-                      <strong>{annotation.source === 'ai' ? 'AI' : 'You'}: {annotation.label}</strong>
-                      <small>{annotation.note || 'No note'}</small>
-                    </button>
+                    <div className="annotationItem" key={annotation.id}>
+                      <button type="button" onClick={() => jumpToReference({ seriesId: annotation.seriesId, sliceIndex: annotation.sliceIndex })}>
+                        <strong>{annotation.source === 'ai' ? 'AI' : 'You'}: {annotation.label}</strong>
+                        <small>{annotation.note || 'No note'} · Drag the label on the image to move it.</small>
+                      </button>
+                      <button className="deleteAnnotation" type="button" onClick={() => deleteAnnotation(annotation.id)} aria-label={`Delete annotation ${annotation.label}`}>Delete</button>
+                    </div>
                   ))}
                 </div>
               )}
@@ -475,6 +540,7 @@ export default function MriWorkspace() {
             <h2>Image-linked interpretation support</h2>
           </div>
           <p className="notice">{analysis.safetyNotice}</p>
+          {analysisStatus && <p className={error ? 'analysisStatus error' : 'analysisStatus'}>{analysisStatus}</p>}
           <h3>Summary</h3>
           <p>{analysis.summary}</p>
           <h3>Possible findings / discussion points</h3>
