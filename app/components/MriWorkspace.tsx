@@ -3,8 +3,9 @@
 import type { ChangeEvent, DragEvent, MouseEvent } from 'react';
 import { useMemo, useRef, useState } from 'react';
 import { ankleChecklist, patientFriendlyGlossary } from '../lib/ankleKnowledge';
+import { expandUploadFiles } from '../lib/archives';
 import { parseDicomFiles } from '../lib/dicom';
-import { describeFiles, getFilesFromDataTransfer, type UploadFile } from '../lib/upload';
+import { describeFiles, getDicomCandidateFiles, getFilesFromDataTransfer, type UploadFile } from '../lib/upload';
 import type { AiAnalysis, Annotation, DicomSeries } from '../lib/types';
 
 const annotationColors = ['#38bdf8', '#f97316', '#a3e635', '#f472b6', '#facc15'];
@@ -49,25 +50,31 @@ export default function MriWorkspace() {
   );
 
   const loadFiles = async (incomingFiles: UploadFile[]) => {
-    const { dicomCandidates, summary } = describeFiles(incomingFiles);
-    setUploadSummary(summary);
-    if (!dicomCandidates.length) {
-      setError('No files were selected. Choose individual DICOM files or a folder that contains the MRI slices.');
-      return;
-    }
-
     setIsParsing(true);
     setError('');
     setWarnings([]);
+
     try {
+      const expanded = await expandUploadFiles(incomingFiles);
+      const { dicomCandidates, skippedNonDicom } = await getDicomCandidateFiles(expanded.files);
+      const { summary } = describeFiles(expanded.files, dicomCandidates.length, expanded.archiveCount, skippedNonDicom);
+      setUploadSummary(summary);
+
+      if (!dicomCandidates.length) {
+        setWarnings(expanded.warnings);
+        setError('No files were selected. Choose DICOM files, a folder/CD that contains MRI slices, or a .zip/.tar/.tgz/.gz archive.');
+        return;
+      }
+
       const result = await parseDicomFiles(dicomCandidates);
+      const allWarnings = [...expanded.warnings, ...result.warnings];
       setSeries(result.series);
-      setWarnings(result.warnings);
+      setWarnings(allWarnings);
       setActiveSeriesId(result.series[0]?.id ?? '');
       setSliceIndex(0);
       setAnnotations([]);
       if (!result.series.length) {
-        setError('No readable MRI slices were found. Select the folder that contains the actual DICOM image files (often extensionless files inside series folders), not just a DICOMDIR/index file. Compressed DICOM transfer syntaxes are not supported in this browser viewer.');
+        setError('No readable image slices were found. The upload opened, but the files with no image dimensions are usually DICOMDIR/index files, reports, presentation states, PDFs, or an incomplete CD export—not the actual slice images. For the portal in your screenshots, download the whole series/study ZIP, keep the full folder structure, and if the Advanced options let you choose it, enable Preferred Transfer Syntax → Explicit VR Little Endian before downloading.');
       }
     } catch (parseError) {
       setError(parseError instanceof Error ? parseError.message : 'Unable to parse those DICOM files.');
@@ -182,12 +189,12 @@ export default function MriWorkspace() {
             onDragLeave={() => setIsDragOver(false)}
             onDrop={handleDrop}
           >
-            <span>{isParsing ? 'Reading DICOM…' : 'Upload DICOM files or folders'}</span>
-            <small>Click to pick files, or drag a study/series folder here. Extensionless DICOM files are accepted.</small>
-            <input type="file" multiple onChange={handleFiles} />
+            <span>{isParsing ? 'Reading DICOM…' : 'Upload DICOM, folder, CD export, or archive'}</span>
+            <small>Click to pick files/archives, or drag a study/series folder here. Extensionless DICOM files and .zip/.tar/.tgz/.gz exports are accepted.</small>
+            <input type="file" multiple accept=".dcm,.dicom,.ima,.zip,.tar,.tgz,.gz,application/dicom,application/zip,application/gzip" onChange={handleFiles} />
           </label>
           <label className="folderUpload">
-            Select a DICOM folder
+            Select a DICOM folder or mounted CD
             <input
               type="file"
               multiple
@@ -261,7 +268,7 @@ export default function MriWorkspace() {
               </div>
             </>
           ) : (
-            <div className="empty">Upload individual DICOM files, drag a series folder, or select all extensionless DICOM image files from your MRI export.</div>
+            <div className="empty">Upload individual DICOM files, drag a series folder/CD export, or pick a compressed .zip/.tar/.tgz archive from your MRI disc/export.</div>
           )}
         </section>
 

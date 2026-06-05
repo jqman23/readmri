@@ -4,8 +4,8 @@ ReadMRI is a Vercel-ready Next.js prototype for patient-friendly ankle/foot MRI 
 
 ## What it does
 
-- Imports multiple `.dcm` files in the browser and groups them by DICOM series UID.
-- Renders uncompressed grayscale MR slices to a canvas-backed PNG for review.
+- Imports individual `.dcm`/extensionless DICOM files, whole study folders or mounted CD exports, and common archive formats (`.zip`, `.tar`, `.tgz`, `.gz`) in the browser before grouping slices by DICOM series UID.
+- Renders uncompressed grayscale MR slices, RLE-compressed slices, and browser-decodable encapsulated JPEG/JPEG 2000 DICOM frames to canvas-backed PNGs for review.
 - Lets users move through slices, switch series, and drop annotations/questions on the MRI image.
 - Sends representative rendered slices, metadata, and annotations to a server API for an AI explanation.
 - Keeps the AI response educational: it must state limitations, avoid diagnosis, and generate questions for a clinician.
@@ -46,4 +46,7 @@ If `OPENAI_API_KEY` is missing, the app returns safe placeholder guidance instea
 
 ## DICOM support notes
 
-This prototype focuses on functionality and supports common uncompressed, single-channel grayscale MR DICOM files. Compressed transfer syntaxes from some scanners/PACS exports may need a server-side DICOM pipeline or a full web imaging stack such as Cornerstone plus codecs.
+This prototype accepts DICOM slices from loose files, folders/CD exports, and common compressed export archives (`.zip`, `.tar`, `.tgz`, `.gz`) directly in the browser. It renders uncompressed grayscale slices, deflated Explicit VR datasets, DICOM RLE Lossless slices, and encapsulated JPEG/JPEG 2000 slices when the current browser has a native decoder for that image stream. If a DICOM uses a pixel transfer syntax the browser cannot decode (for example some JPEG Lossless, JPEG-LS, or JPEG 2000 combinations), ReadMRI still loads the slice metadata and shows a clear placeholder/warning instead of rejecting the DCM file outright.
+
+
+Tip for exports like Ambra/Visage-style download dialogs: if the advanced menu offers **Preferred Transfer Syntax**, choose **Explicit VR Little Endian** for the most reliable browser import. If you download a DICOM CD ZIP, keep the whole ZIP/folder together; `DICOMDIR`, reports, and presentation-state files are expected and will be skipped while image slices are imported.
