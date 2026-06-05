@@ -23,6 +23,8 @@ type DataTransferItemWithEntry = DataTransferItem & {
 };
 
 const DICOM_EXTENSIONS = new Set(['.dcm', '.dicom', '.ima']);
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.m4v', '.mov', '.webm']);
+const VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v']);
 const KNOWN_NON_DICOM_EXTENSIONS = new Set([
   '.bmp',
   '.css',
@@ -98,11 +100,15 @@ function uploadPath(file: UploadFile) {
   return file.webkitRelativePath || file.name;
 }
 
-function extensionOf(file: UploadFile) {
+export function extensionOf(file: UploadFile) {
   const name = uploadPath(file).toLowerCase();
   const lastSegment = name.split('/').pop() || name;
   const dotIndex = lastSegment.lastIndexOf('.');
   return dotIndex >= 0 ? lastSegment.slice(dotIndex) : '';
+}
+
+export function isVideoFile(file: UploadFile) {
+  return VIDEO_EXTENSIONS.has(extensionOf(file)) || VIDEO_MIME_TYPES.has(file.type.toLowerCase());
 }
 
 async function hasDicomPreamble(file: UploadFile) {
@@ -119,6 +125,11 @@ export async function getDicomCandidateFiles(files: UploadFile[]): Promise<{ dic
     if (file.size === 0) continue;
 
     const extension = extensionOf(file);
+    if (isVideoFile(file)) {
+      skippedNonDicom += 1;
+      continue;
+    }
+
     if (DICOM_EXTENSIONS.has(extension) || await hasDicomPreamble(file)) {
       candidates.push(file);
       continue;
@@ -140,7 +151,7 @@ export async function getDicomCandidateFiles(files: UploadFile[]): Promise<{ dic
   return { dicomCandidates: candidates, skippedNonDicom };
 }
 
-export function describeFiles(files: UploadFile[], dicomCandidateCount?: number, archiveCount = 0, skippedNonDicom = 0) {
+export function describeFiles(files: UploadFile[], dicomCandidateCount?: number, archiveCount = 0, skippedNonDicom = 0, videoCount = 0) {
   const nonEmpty = files.filter((file) => file.size > 0);
   const skippedEmpty = files.length - nonEmpty.length;
   const selectedCount = dicomCandidateCount ?? nonEmpty.length;
@@ -151,6 +162,6 @@ export function describeFiles(files: UploadFile[], dicomCandidateCount?: number,
   ).size;
 
   return {
-    summary: `${selectedCount.toLocaleString()} DICOM candidate${selectedCount === 1 ? '' : 's'} selected${folderCount ? ` from ${folderCount.toLocaleString()} folder${folderCount === 1 ? '' : 's'}` : ''}${archiveCount ? ` after unpacking ${archiveCount.toLocaleString()} archive${archiveCount === 1 ? '' : 's'}` : ''}${skippedNonDicom ? ` (${skippedNonDicom.toLocaleString()} viewer/document file${skippedNonDicom === 1 ? '' : 's'} skipped)` : ''}${skippedEmpty ? ` (${skippedEmpty.toLocaleString()} empty skipped)` : ''}.`,
+    summary: `${selectedCount.toLocaleString()} DICOM candidate${selectedCount === 1 ? '' : 's'}${videoCount ? ` and ${videoCount.toLocaleString()} video${videoCount === 1 ? '' : 's'}` : ''} selected${folderCount ? ` from ${folderCount.toLocaleString()} folder${folderCount === 1 ? '' : 's'}` : ''}${archiveCount ? ` after unpacking ${archiveCount.toLocaleString()} archive${archiveCount === 1 ? '' : 's'}` : ''}${skippedNonDicom ? ` (${skippedNonDicom.toLocaleString()} viewer/document file${skippedNonDicom === 1 ? '' : 's'} skipped)` : ''}${skippedEmpty ? ` (${skippedEmpty.toLocaleString()} empty skipped)` : ''}.`,
   };
 }
