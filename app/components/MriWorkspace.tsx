@@ -9,11 +9,10 @@ import { parseDicomFiles } from '../lib/dicom';
 import { parseImageFiles } from '../lib/image';
 import { parseVideoFiles, type VideoFrameOptions } from '../lib/video';
 import { describeFiles, getDicomCandidateFiles, getFilesFromDataTransfer, isImageFile, isVideoFile, type UploadFile } from '../lib/upload';
-import type { AiAnalysis, AiImageReference, Annotation, DicomSeries, DicomSlice } from '../lib/types';
+import type { AiAnalysis, AiChatMessage, AiImageReference, Annotation, DicomSeries, DicomSlice } from '../lib/types';
 
 const annotationColors = ['#38bdf8', '#f97316', '#a3e635', '#f472b6', '#facc15'];
 const AI_COLOR = '#facc15';
-const MAX_CLIENT_IMAGES = 24;
 const MAX_AI_IMAGE_SIDE = 768;
 const AI_IMAGE_JPEG_QUALITY = 0.82;
 
@@ -106,25 +105,6 @@ function createDefaultAnalysis(): AiAnalysis {
   };
 }
 
-function evenlySampleSeries(seriesItems: DicomSeries[], maxImages: number) {
-  const selected = seriesItems.filter((item) => item.slices.length > 0);
-  if (selected.length === 0) return [];
-
-  const perSeries = Math.max(1, Math.floor(maxImages / selected.length));
-  const sampled = selected.flatMap((item) => {
-    if (item.slices.length <= perSeries) {
-      return item.slices.map((slice, sliceIndex) => ({ series: item, slice, sliceIndex }));
-    }
-
-    const lastIndex = item.slices.length - 1;
-    const indexes = new Set<number>();
-    for (let i = 0; i < perSeries; i += 1) indexes.add(Math.round((i * lastIndex) / Math.max(perSeries - 1, 1)));
-    return Array.from(indexes).map((sliceIndex) => ({ series: item, slice: item.slices[sliceIndex], sliceIndex }));
-  });
-
-  return sampled.slice(0, maxImages);
-}
-
 function referenceLabel(reference: AiImageReference) {
   return `${reference.seriesDescription} · slice ${reference.sliceIndex + 1} · ${reference.fileName}`;
 }
@@ -138,7 +118,8 @@ export default function MriWorkspace() {
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [annotationDraft, setAnnotationDraft] = useState({ label: 'Area to ask about', note: '' });
   const [analysis, setAnalysis] = useState<AiAnalysis>(createDefaultAnalysis);
-  const [userQuestion, setUserQuestion] = useState('What do you notice in the selected series, and which exact slices should I ask my clinician about?');
+  const [userQuestion, setUserQuestion] = useState('What do you notice on this current frame, especially around my annotations?');
+  const [aiChatHistory, setAiChatHistory] = useState<AiChatMessage[]>([]);
   const [isParsing, setIsParsing] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isRestoring, setIsRestoring] = useState(true);
@@ -156,14 +137,9 @@ export default function MriWorkspace() {
     [activeSeriesId, series],
   );
   const activeSlice = activeSeries?.slices[Math.min(sliceIndex, Math.max(activeSeries.slices.length - 1, 0))];
-  const selectedSeries = useMemo(
-    () => series.filter((item) => selectedSeriesIds.includes(item.id)),
-    [selectedSeriesIds, series],
-  );
   const visibleAnnotations = annotations.filter(
     (annotation) => annotation.seriesId === activeSeries?.id && annotation.sliceIndex === sliceIndex,
   );
-  const sampledImages = useMemo(() => evenlySampleSeries(selectedSeries, MAX_CLIENT_IMAGES), [selectedSeries]);
 
   useEffect(() => {
     let canceled = false;
@@ -178,7 +154,8 @@ export default function MriWorkspace() {
         setSliceIndex(persisted.sliceIndex ?? 0);
         setSelectedSeriesIds(persisted.selectedSeriesIds?.length ? persisted.selectedSeriesIds : persisted.series.map((item) => item.id));
         setUploadSummary(persisted.uploadSummary);
-        setUserQuestion(persisted.userQuestion || 'What do you notice in the selected series, and which exact slices should I ask my clinician about?');
+        setUserQuestion(persisted.userQuestion || 'What do you notice on this current frame, especially around my annotations?');
+        setAiChatHistory(persisted.aiChatHistory ?? []);
         setStorageMessage(`Restored ${persisted.series.length} locally saved series from this browser.`);
       })
       .catch((storageError) => setWarnings((existing) => [...existing, storageError instanceof Error ? storageError.message : 'Unable to restore local browser storage.']))
@@ -206,12 +183,13 @@ export default function MriWorkspace() {
         selectedSeriesIds,
         uploadSummary,
         userQuestion,
+        aiChatHistory,
         savedAt: new Date().toISOString(),
       }).catch((storageError) => setWarnings((existing) => [...existing, storageError instanceof Error ? storageError.message : 'Unable to save this study in local browser storage.']));
     }, 450);
 
     return () => window.clearTimeout(timeoutId);
-  }, [activeSeries?.id, activeSeriesId, analysis, annotations, isHydrated, selectedSeriesIds, series, sliceIndex, uploadSummary, userQuestion]);
+  }, [activeSeries?.id, activeSeriesId, aiChatHistory, analysis, annotations, isHydrated, selectedSeriesIds, series, sliceIndex, uploadSummary, userQuestion]);
 
   const loadFiles = async (incomingFiles: UploadFile[]) => {
     setIsParsing(true);
@@ -344,10 +322,6 @@ export default function MriWorkspace() {
     setSliceIndex(reference.sliceIndex);
   };
 
-  const toggleSelectedSeries = (seriesId: string) => {
-    setSelectedSeriesIds((existing) => existing.includes(seriesId) ? existing.filter((id) => id !== seriesId) : [...existing, seriesId]);
-  };
-
   const resetWorkspace = async () => {
     await clearPersistedWorkspace();
     setSeries([]);
@@ -357,6 +331,7 @@ export default function MriWorkspace() {
     setAnnotations([]);
     setAnalysis(createDefaultAnalysis());
     setAnalysisStatus('');
+    setAiChatHistory([]);
     setUploadSummary('');
     setStorageMessage('Cleared locally saved browser study data.');
   };
@@ -366,41 +341,54 @@ export default function MriWorkspace() {
     ?.slices[targetSliceIndex];
 
   const runAnalysis = async () => {
-    if (!selectedSeries.length || !sampledImages.length) return;
+    if (!activeSeries || !activeSlice) return;
     setIsAnalyzing(true);
     setError('');
-    setAnalysisStatus(`Sending ${sampledImages.length} image reference${sampledImages.length === 1 ? '' : 's'} to AI...`);
+    setAnalysisStatus(`Sending current frame: ${activeSeries.description} slice ${sliceIndex + 1}...`);
+
+    const questionText = userQuestion.trim() || 'Explain this current MRI frame in plain language.';
+    const userMessage: AiChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      text: questionText,
+      createdAt: new Date().toISOString(),
+      seriesId: activeSeries.id,
+      sliceIndex,
+    };
+
     try {
-      const aiImageDataUrls = await Promise.all(sampledImages.map(({ slice }) => makeAiImageDataUrl(slice.canvasDataUrl)));
+      const aiImageDataUrl = await makeAiImageDataUrl(activeSlice.canvasDataUrl);
+      const frameAnnotations = annotations.filter((annotation) => annotation.seriesId === activeSeries.id && annotation.sliceIndex === sliceIndex);
       const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          question: userQuestion,
-          series: selectedSeries.map((item) => ({
-            id: item.id,
-            description: item.description,
-            sequenceName: item.sequenceName,
-            plane: item.plane,
-            sliceCount: item.slices.length,
+          question: questionText,
+          series: {
+            id: activeSeries.id,
+            description: activeSeries.description,
+            sequenceName: activeSeries.sequenceName,
+            plane: activeSeries.plane,
+            sliceCount: activeSeries.slices.length,
             metadata: {
-              bodyPartExamined: item.slices[0]?.bodyPartExamined,
-              studyDescription: item.slices[0]?.studyDescription,
-              pixelSpacing: item.slices[0]?.pixelSpacing,
-              windowCenter: item.slices[0]?.windowCenter,
-              windowWidth: item.slices[0]?.windowWidth,
+              bodyPartExamined: activeSlice.bodyPartExamined,
+              studyDescription: activeSlice.studyDescription,
+              pixelSpacing: activeSlice.pixelSpacing,
+              windowCenter: activeSlice.windowCenter,
+              windowWidth: activeSlice.windowWidth,
             },
-          })),
-          annotations: annotations.filter((annotation) => selectedSeriesIds.includes(annotation.seriesId)),
-          images: sampledImages.map(({ series: item, slice, sliceIndex: imageSliceIndex }, imageIndex) => ({
-            imageId: `image-${imageIndex + 1}`,
-            seriesId: item.id,
-            seriesDescription: item.description,
-            sliceIndex: imageSliceIndex,
-            fileName: slice.fileName,
-            instanceNumber: slice.instanceNumber,
-            dataUrl: aiImageDataUrls[imageIndex],
-          })),
+          },
+          annotations: frameAnnotations,
+          currentFrame: {
+            imageId: 'current-frame',
+            seriesId: activeSeries.id,
+            seriesDescription: activeSeries.description,
+            sliceIndex,
+            fileName: activeSlice.fileName,
+            instanceNumber: activeSlice.instanceNumber,
+            dataUrl: aiImageDataUrl,
+          },
+          chatHistory: aiChatHistory,
         }),
       });
       const json = await readJsonResponse(response);
@@ -411,14 +399,26 @@ export default function MriWorkspace() {
         id: annotation.id || `ai-${Date.now()}-${index}`,
         color: annotation.color || AI_COLOR,
         source: 'ai' as const,
+        seriesId: activeSeries.id,
+        sliceIndex,
       }));
       const normalizedAnalysis = { ...nextAnalysis, referencedAnnotations: normalizedAiAnnotations };
+      const assistantMessage: AiChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        text: normalizedAnalysis.summary,
+        createdAt: new Date().toISOString(),
+        seriesId: activeSeries.id,
+        sliceIndex,
+      };
+
       setAnalysis(normalizedAnalysis);
+      setAiChatHistory((existing) => [...existing, userMessage, assistantMessage].slice(-24));
       setAnalysisStatus(normalizedAnalysis.limitations?.some((limitation) => limitation.includes('No configured AI model'))
         ? 'AI is not configured yet, so ReadMRI showed safe placeholder guidance instead of image interpretation.'
-        : `AI analysis complete for ${sampledImages.length} image reference${sampledImages.length === 1 ? '' : 's'}.`);
+        : `AI answered using only current frame ${activeSeries.description} slice ${sliceIndex + 1}.`);
       setAnnotations((existing) => [
-        ...existing.filter((annotation) => annotation.source !== 'ai'),
+        ...existing.filter((annotation) => !(annotation.source === 'ai' && annotation.seriesId === activeSeries.id && annotation.sliceIndex === sliceIndex)),
         ...normalizedAiAnnotations,
       ]);
     } catch (analysisError) {
@@ -437,7 +437,7 @@ export default function MriWorkspace() {
           <p className="eyebrow">Ankle + foot MRI education workspace</p>
           <h1>ReadMRI helps non-experts explore multiple MRI series.</h1>
           <p className="lede">
-            Import several DICOM/image/video series, restore them from browser storage after refresh, view one series at a time, and ask AI focused questions about whichever series you select.
+            Import DICOM/image/video MRI data, view one slice at a time, mark the exact area you care about, and chat with AI that inspects only the currently active frame while remembering your conversation.
           </p>
         </div>
         <div className="safety">
@@ -506,23 +506,15 @@ export default function MriWorkspace() {
             />
           </div>
 
-          <div className="seriesPicker">
-            <div className="seriesPickerHeader">
-              <label>Series AI should inspect</label>
-              <button type="button" onClick={() => setSelectedSeriesIds(series.map((item) => item.id))} disabled={!series.length}>All</button>
-              <button type="button" onClick={() => setSelectedSeriesIds([])} disabled={!series.length}>None</button>
-            </div>
-            {series.length ? series.map((item) => (
-              <label className="seriesCheck" key={item.id}>
-                <input type="checkbox" checked={selectedSeriesIds.includes(item.id)} onChange={() => toggleSelectedSeries(item.id)} />
-                <span>{item.description} <small>{item.plane} · {item.slices.length} slices</small></span>
-              </label>
-            )) : <p className="muted">Upload series before selecting images for AI.</p>}
+          <div className="currentFrameAi">
+            <strong>AI vision scope: current frame only</strong>
+            <span>{activeSeries && activeSlice ? `${activeSeries.description} · slice ${sliceIndex + 1} · ${activeSlice.fileName}` : 'Upload and open a frame before asking AI.'}</span>
+            <small>Chat memory is saved, but each AI request visually inspects only the active image on screen plus your annotations on that image.</small>
           </div>
 
           <div className="field">
-            <label>Ask AI a specific question</label>
-            <textarea value={userQuestion} onChange={(event) => setUserQuestion(event.target.value)} placeholder="Example: Compare the sagittal and axial series for Achilles tendon concerns and point me to exact slices." />
+            <label>Chat with AI about this frame</label>
+            <textarea value={userQuestion} onChange={(event) => setUserQuestion(event.target.value)} placeholder="Example: Is the area I marked near the tendon or bone? What should I ask my clinician?" />
           </div>
 
           <div className="field">
@@ -533,10 +525,10 @@ export default function MriWorkspace() {
             <label>Manual question/note</label>
             <textarea value={annotationDraft.note} onChange={(event) => setAnnotationDraft({ ...annotationDraft, note: event.target.value })} placeholder="Example: Is this tendon swollen?" />
           </div>
-          <button className="primary" onClick={runAnalysis} disabled={!sampledImages.length || isAnalyzing}>
-            {isAnalyzing ? `Analyzing ${sampledImages.length} image references…` : `Ask AI about ${selectedSeries.length || 0} selected series`}
+          <button className="primary" onClick={runAnalysis} disabled={!activeSlice || isAnalyzing}>
+            {isAnalyzing ? 'Analyzing current frame…' : 'Ask AI about current frame'}
           </button>
-          <p className="hint">Click directly on the MRI image to drop your own annotation. AI answers can also add yellow image-linked callouts.</p>
+          <p className="hint">Click directly on the MRI image to drop an annotation first. AI answers can add yellow callouts, but only on the current frame.</p>
         </aside>
 
         <section className="card viewer">
@@ -595,10 +587,25 @@ export default function MriWorkspace() {
         <aside className="card analysis">
           <div className="sectionTitle">
             <p className="eyebrow">AI explanation</p>
-            <h2>Image-linked interpretation support</h2>
+            <h2>Current-frame chat support</h2>
           </div>
           <p className="notice">{analysis.safetyNotice}</p>
           {analysisStatus && <p className={error ? 'analysisStatus error' : 'analysisStatus'}>{analysisStatus}</p>}
+          {aiChatHistory.length > 0 && (
+            <div className="chatHistory">
+              <div className="chatHistoryHeader">
+                <h3>Frame chat memory</h3>
+                <button type="button" onClick={() => setAiChatHistory([])}>Clear chat</button>
+              </div>
+              {aiChatHistory.slice(-6).map((message) => (
+                <p key={message.id} className={`chatBubble ${message.role}`}>
+                  <strong>{message.role === 'user' ? 'You' : 'AI'}</strong>
+                  <span>{message.text}</span>
+                  {message.seriesId && typeof message.sliceIndex === 'number' && <small>Frame: slice {message.sliceIndex + 1}</small>}
+                </p>
+              ))}
+            </div>
+          )}
           <h3>Summary</h3>
           <p>{analysis.summary}</p>
           <h3>Possible findings / discussion points</h3>
@@ -618,7 +625,7 @@ export default function MriWorkspace() {
                 </div>
               )}
             </article>
-          )) : <p className="muted">No AI findings yet. Select one or more series, ask a question, and run the explanation.</p>}
+          )) : <p className="muted">No AI findings yet. Open a frame, optionally mark an area, then ask about the current image.</p>}
           {analysis.referencedAnnotations?.length > 0 && (
             <>
               <h3>AI callouts</h3>

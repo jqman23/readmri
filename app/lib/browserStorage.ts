@@ -1,4 +1,4 @@
-import type { AiAnalysis, Annotation, DicomSeries } from './types';
+import type { AiAnalysis, AiChatMessage, Annotation, DicomSeries } from './types';
 
 const DB_NAME = 'readmri-workspace';
 const DB_VERSION = 1;
@@ -14,6 +14,7 @@ export type PersistedWorkspace = {
   selectedSeriesIds: string[];
   uploadSummary: string;
   userQuestion: string;
+  aiChatHistory?: AiChatMessage[];
   savedAt: string;
 };
 
