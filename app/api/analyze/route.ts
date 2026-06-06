@@ -42,7 +42,7 @@ const chatMessageSchema = z.object({
   sliceIndex: z.number().optional(),
 });
 
-const currentFrameSchema = z.object({
+const imageFrameSchema = z.object({
   imageId: z.string(),
   seriesId: z.string(),
   seriesDescription: z.string(),
@@ -51,6 +51,8 @@ const currentFrameSchema = z.object({
   instanceNumber: z.number(),
   dataUrl: z.string().regex(/^data:image\/(png|jpe?g|webp);base64,/),
 });
+
+const currentFrameSchema = imageFrameSchema;
 
 const analyzeSchema = z.object({
   question: z.string().default('Explain this current MRI frame in plain language.'),
@@ -64,6 +66,14 @@ const analyzeSchema = z.object({
   }),
   annotations: z.array(annotationSchema).default([]),
   currentFrame: currentFrameSchema,
+  contextFrames: z.array(imageFrameSchema).default([]),
+  studySeries: z.array(z.object({
+    id: z.string(),
+    description: z.string(),
+    sequenceName: z.string().optional(),
+    plane: z.string(),
+    sliceCount: z.number(),
+  })).default([]),
   chatHistory: z.array(chatMessageSchema).default([]),
 });
 
@@ -264,7 +274,21 @@ function stringOrDefault(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() ? value : fallback;
 }
 
-function normalizeProviderAnalysis(value: unknown, frame: z.infer<typeof currentFrameSchema>): unknown {
+function frameReferenceFor(frame: z.infer<typeof imageFrameSchema>) {
+  const { dataUrl, ...reference } = frame;
+  return reference;
+}
+
+function findAllowedReference(
+  referenceObject: Record<string, unknown>,
+  currentFrame: z.infer<typeof currentFrameSchema>,
+  contextFrames: z.infer<typeof imageFrameSchema>[],
+) {
+  const allowedFrames = [currentFrame, ...contextFrames];
+  return allowedFrames.find((candidate) => candidate.seriesId === referenceObject.seriesId && candidate.sliceIndex === referenceObject.sliceIndex) ?? currentFrame;
+}
+
+function normalizeProviderAnalysis(value: unknown, frame: z.infer<typeof currentFrameSchema>, contextFrames: z.infer<typeof imageFrameSchema>[] = []): unknown {
   const objectValue = value && typeof value === 'object' ? value as Record<string, unknown> : {};
   return {
     summary: stringOrDefault(objectValue.summary, 'I reviewed the current frame, but the provider response was incomplete.'),
@@ -282,13 +306,14 @@ function normalizeProviderAnalysis(value: unknown, frame: z.infer<typeof current
         suggestedFollowUp: stringOrDefault(findingObject.suggestedFollowUp, 'Ask your clinician or radiologist to correlate this with the full DICOM series.'),
         references: (arrayOrEmpty(findingObject.references).length ? arrayOrEmpty(findingObject.references) : [{}]).map((reference, referenceIndex) => {
           const referenceObject = reference && typeof reference === 'object' ? reference as Record<string, unknown> : {};
+          const allowedFrame = findAllowedReference(referenceObject, frame, contextFrames);
           return {
-            seriesId: frame.seriesId,
-            seriesDescription: frame.seriesDescription,
-            sliceIndex: frame.sliceIndex,
-            fileName: frame.fileName,
-            instanceNumber: frame.instanceNumber,
-            label: stringOrDefault(referenceObject.label, referenceIndex === 0 ? 'Current frame' : `Current frame ${referenceIndex + 1}`),
+            seriesId: allowedFrame.seriesId,
+            seriesDescription: allowedFrame.seriesDescription,
+            sliceIndex: allowedFrame.sliceIndex,
+            fileName: allowedFrame.fileName,
+            instanceNumber: allowedFrame.instanceNumber,
+            label: stringOrDefault(referenceObject.label, referenceIndex === 0 ? 'Best visible frame' : `Context frame ${referenceIndex + 1}`),
             x: typeof referenceObject.x === 'number' ? referenceObject.x : undefined,
             y: typeof referenceObject.y === 'number' ? referenceObject.y : undefined,
             width: typeof referenceObject.width === 'number' ? referenceObject.width : undefined,
@@ -318,19 +343,15 @@ function normalizeProviderAnalysis(value: unknown, frame: z.infer<typeof current
   };
 }
 
-function parseAiAnalysis(value: unknown, frame: z.infer<typeof currentFrameSchema>): AiAnalysis {
-  const result = aiAnalysisSchema.parse(normalizeProviderAnalysis(value, frame));
+function parseAiAnalysis(value: unknown, frame: z.infer<typeof currentFrameSchema>, contextFrames: z.infer<typeof imageFrameSchema>[] = []): AiAnalysis {
+  const result = aiAnalysisSchema.parse(normalizeProviderAnalysis(value, frame, contextFrames));
   return {
     ...result,
     findings: (result.findings as AiFinding[]).map((finding) => ({
       ...finding,
       references: finding.references.map((reference) => ({
         ...reference,
-        seriesId: frame.seriesId,
-        seriesDescription: frame.seriesDescription,
-        sliceIndex: frame.sliceIndex,
-        fileName: frame.fileName,
-        instanceNumber: frame.instanceNumber,
+        ...frameReferenceFor(findAllowedReference(reference, frame, contextFrames)),
       })),
     })),
     referencedAnnotations: (result.referencedAnnotations as Annotation[]).map((annotation) => ({
@@ -341,14 +362,14 @@ function parseAiAnalysis(value: unknown, frame: z.infer<typeof currentFrameSchem
   };
 }
 
-function extractJson(text: string, frame: z.infer<typeof currentFrameSchema>): AiAnalysis {
+function extractJson(text: string, frame: z.infer<typeof currentFrameSchema>, contextFrames: z.infer<typeof imageFrameSchema>[] = []): AiAnalysis {
   const raw = extractFirstJsonObject(text);
   if (!raw) {
     throw new AiResponseFormatError('The AI provider returned text instead of the required JSON analysis. Try again, or switch to a model that supports JSON/structured output.');
   }
 
   try {
-    return parseAiAnalysis(JSON.parse(raw), frame);
+    return parseAiAnalysis(JSON.parse(raw), frame, contextFrames);
   } catch (error) {
     if (error instanceof z.ZodError) {
       throw new AiResponseFormatError(`The AI provider returned JSON, but it did not match the ReadMRI analysis format: ${error.issues.map((issue) => issue.path.join('.') || 'root').join(', ')}`);
@@ -387,7 +408,9 @@ export async function POST(request: NextRequest) {
 
   const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseURL });
   const frame = payload.currentFrame;
-  const frameReference = (({ dataUrl, ...image }) => image)(frame);
+  const contextFrames = payload.contextFrames.filter((contextFrame) => !(contextFrame.seriesId === frame.seriesId && contextFrame.sliceIndex === frame.sliceIndex)).slice(0, 4);
+  const frameReference = frameReferenceFor(frame);
+  const contextFrameReferences = contextFrames.map(frameReferenceFor);
   const currentFrameAnnotations = payload.annotations.filter((annotation) => annotation.seriesId === frame.seriesId && annotation.sliceIndex === frame.sliceIndex);
   const chatContext = payload.chatHistory.slice(-12).map((message) => ({
     role: message.role,
@@ -397,35 +420,38 @@ export async function POST(request: NextRequest) {
   }));
 
   const responseContract = {
-    summary: 'direct chatbot answer about the current frame only',
+    summary: 'direct chatbot answer that focuses on the current frame and gives navigation guidance when useful',
     safetyNotice: 'string emphasizing educational/non-diagnostic limits',
     structuresChecklist: ankleChecklist,
     findings: [
       {
-        region: 'specific anatomy or image pattern visible on the current frame',
+        region: 'specific anatomy, image pattern, or navigation target visible on current/adjacent frames',
         plainLanguage: 'answer the user question in patient-friendly terms',
         whyItMatters: 'why this may matter clinically without diagnosing',
         confidence: 'low | medium | high',
         suggestedFollowUp: 'clinician/radiology follow-up question',
-        references: [{ seriesId: frame.seriesId, seriesDescription: frame.seriesDescription, sliceIndex: frame.sliceIndex, fileName: frame.fileName, instanceNumber: frame.instanceNumber, label: 'short current-frame label', x: 50, y: 50, width: 15, height: 15 }],
+        references: [{ seriesId: frame.seriesId, seriesDescription: frame.seriesDescription, sliceIndex: frame.sliceIndex, fileName: frame.fileName, instanceNumber: frame.instanceNumber, label: 'short current or adjacent frame label', x: 50, y: 50, width: 15, height: 15 }],
       },
     ],
     questionsForDoctor: ['string'],
-    limitations: ['single-frame limitation, missing adjacent slices, image quality, or uncertainty'],
+    limitations: ['limited adjacent-slice context, image quality, incomplete series-level review, or uncertainty'],
     referencedAnnotations: [{ id: 'ai-generated id', seriesId: frame.seriesId, sliceIndex: frame.sliceIndex, x: 50, y: 50, width: 15, height: 15, label: 'short callout', note: 'what the AI is pointing at on current frame', color: '#facc15', source: 'ai' }],
   };
 
   const userText = [
-    'Mode: current-frame chat. The AI can visually inspect ONLY the one attached current frame in this request.',
-    'Use chat history only as conversation memory, not as visible evidence. If the user asks about another slice/series, tell them to navigate there and ask again.',
+    'Mode: guided single-slice MRI chat. The current frame is the main image; adjacent context frames may be used ONLY to orient anatomy, compare continuity, or suggest moving a few slices.',
+    'Make the most of the visible images: describe useful anatomy/patterns instead of stopping at generic uncertainty. If the current frame is not ideal, say exactly whether to move before/after or switch series.',
+    'Use chat history only as conversation memory, not as visible evidence. If the user asks to find the best image after importing all series, use the study series inventory plus current/adjacent frames to recommend a concrete series and approximate slice range, then ask them to navigate there for focused review.',
     `User question: ${payload.question}`,
     `Current frame metadata: ${JSON.stringify(frameReference)}`,
+    `Adjacent/context frame metadata: ${JSON.stringify(contextFrameReferences)}`,
     `Current series metadata: ${JSON.stringify(payload.series)}`,
+    `Imported study series inventory: ${JSON.stringify(payload.studySeries)}`,
     `User annotations on this current frame: ${JSON.stringify(currentFrameAnnotations)}`,
     `Recent chat memory: ${JSON.stringify(chatContext)}`,
     `Return ONLY JSON matching this contract: ${JSON.stringify(responseContract)}`,
-    'Every visible-image finding must reference the current frame values exactly. Do not reference any non-current image.',
-    'When helpful, add referencedAnnotations with percentage x/y coordinates and optional width/height so the UI can draw yellow callouts on this frame.',
+    'Every visible-image finding must reference either the current frame or one supplied adjacent context frame exactly. Do not invent or reference unsupplied images.',
+    'When helpful, add referencedAnnotations with percentage x/y coordinates and optional width/height so the UI can draw yellow callouts on the CURRENT frame only.',
     'Be conservative. A single frame can explain anatomy and visible patterns, but it cannot replace full DICOM stack review, the radiology report, or clinical exam.',
   ].join('\n');
 
@@ -443,6 +469,10 @@ export async function POST(request: NextRequest) {
                 type: 'image_url' as const,
                 image_url: { url: frame.dataUrl },
               },
+              ...contextFrames.map((contextFrame) => ({
+                type: 'image_url' as const,
+                image_url: { url: contextFrame.dataUrl },
+              })),
             ],
           },
         ],
@@ -451,7 +481,7 @@ export async function POST(request: NextRequest) {
         response_format: { type: 'json_object' },
       });
 
-      return NextResponse.json({ analysis: extractJson(response.choices[0]?.message.content ?? '{}', frame) });
+      return NextResponse.json({ analysis: extractJson(response.choices[0]?.message.content ?? '{}', frame, contextFrames) });
     }
 
     const response = await client.responses.create({
@@ -467,6 +497,11 @@ export async function POST(request: NextRequest) {
               image_url: frame.dataUrl,
               detail: 'high' as const,
             },
+            ...contextFrames.map((contextFrame) => ({
+              type: 'input_image' as const,
+              image_url: contextFrame.dataUrl,
+              detail: 'low' as const,
+            })),
           ],
         },
       ],
@@ -482,7 +517,7 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    return NextResponse.json({ analysis: extractJson(response.output_text, frame) });
+    return NextResponse.json({ analysis: extractJson(response.output_text, frame, contextFrames) });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : `${config.provider} failed to analyze the current frame.` },
