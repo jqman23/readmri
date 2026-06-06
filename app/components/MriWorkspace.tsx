@@ -16,6 +16,12 @@ const AI_COLOR = '#facc15';
 const MAX_AI_IMAGE_SIDE = 768;
 const AI_IMAGE_JPEG_QUALITY = 0.82;
 
+const exampleQuestions = [
+  'Explain this slice in plain English and tell me what anatomy I am looking at.',
+  'Help me find the best series and slice range for the painful area I describe.',
+  'What should I ask my clinician about this area and what are the limits of this image?',
+];
+
 function promptVideoFrameOptions(videoCount: number): VideoFrameOptions {
   const frameCountInput = window.prompt(
     `${videoCount} video file${videoCount === 1 ? '' : 's'} selected. How many frames/slices should ReadMRI extract?`,
@@ -138,6 +144,8 @@ export default function MriWorkspace() {
     [activeSeriesId, series],
   );
   const activeSlice = activeSeries?.slices[Math.min(sliceIndex, Math.max(activeSeries.slices.length - 1, 0))];
+  const totalSlices = useMemo(() => series.reduce((total, item) => total + item.slices.length, 0), [series]);
+  const userAnnotationCount = annotations.filter((annotation) => annotation.source !== 'ai').length;
   const visibleAnnotations = annotations.filter(
     (annotation) => annotation.seriesId === activeSeries?.id && annotation.sliceIndex === sliceIndex,
   );
@@ -145,6 +153,27 @@ export default function MriWorkspace() {
   useEffect(() => {
     latestViewStateRef.current = { activeSeriesId: activeSeries?.id ?? activeSeriesId, sliceIndex };
   }, [activeSeries?.id, activeSeriesId, sliceIndex]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.tagName === 'TEXTAREA' || target?.tagName === 'INPUT' || target?.tagName === 'SELECT') return;
+      if (!activeSeries) return;
+
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        setSliceIndex((current) => Math.max(current - 1, 0));
+      }
+
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        setSliceIndex((current) => Math.min(current + 1, activeSeries.slices.length - 1));
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeSeries]);
 
   useEffect(() => {
     if (!activeSeries) return;
@@ -338,6 +367,12 @@ export default function MriWorkspace() {
     setSliceIndex(reference.sliceIndex);
   };
 
+  const goToPreviousSlice = () => setSliceIndex((current) => Math.max(current - 1, 0));
+  const goToNextSlice = () => {
+    if (!activeSeries) return;
+    setSliceIndex((current) => Math.min(current + 1, activeSeries.slices.length - 1));
+  };
+
   const resetWorkspace = async () => {
     await clearPersistedWorkspace();
     setSeries([]);
@@ -407,7 +442,7 @@ export default function MriWorkspace() {
             },
           },
           annotations: frameAnnotations,
-          studySeries: series.map((item) => ({
+          studySeries: series.filter((item) => selectedSeriesIds.includes(item.id)).map((item) => ({
             id: item.id,
             description: item.description,
             sequenceName: item.sequenceName,
@@ -469,21 +504,51 @@ export default function MriWorkspace() {
   return (
     <main className="shell">
       <section className="hero card">
-        <div>
+        <div className="heroCopy">
           <p className="eyebrow">Ankle + foot MRI education workspace</p>
-          <h1>ReadMRI helps non-experts explore multiple MRI series.</h1>
+          <h1>A calmer way to explore your MRI before the appointment.</h1>
           <p className="lede">
-            Import DICOM/image/video MRI data, view one slice at a time, mark the exact area you care about, and chat with AI that focuses on the active frame while using nearby slices and series metadata to guide where to look next.
+            Upload a study, move through slices with simple controls, mark exactly what you want to ask about, and turn the image into plain-language questions for your clinician.
           </p>
+          <div className="heroActions" aria-label="Suggested workflow">
+            <a href="#upload-panel">1. Upload</a>
+            <a href="#viewer-panel">2. Review slices</a>
+            <a href="#ai-panel">3. Ask AI</a>
+          </div>
         </div>
         <div className="safety">
-          <strong>Not a diagnosis.</strong>
-          <span>Use this to understand anatomy and questions to ask. A radiologist and clinician must make medical decisions.</span>
+          <strong>Educational only — not a diagnosis.</strong>
+          <span>Use ReadMRI to understand anatomy, prepare questions, and organize observations. Medical decisions still require your radiology report and licensed clinicians.</span>
+        </div>
+      </section>
+
+      <section className="statusStrip card" aria-label="Study status">
+        <div>
+          <span className="statusLabel">Series loaded</span>
+          <strong>{series.length}</strong>
+        </div>
+        <div>
+          <span className="statusLabel">Slices ready</span>
+          <strong>{totalSlices}</strong>
+        </div>
+        <div>
+          <span className="statusLabel">Your notes</span>
+          <strong>{userAnnotationCount}</strong>
+        </div>
+        <div>
+          <span className="statusLabel">Local save</span>
+          <strong>{isRestoring ? 'Checking' : isHydrated ? 'On' : 'Off'}</strong>
         </div>
       </section>
 
       <section className="grid">
-        <aside className="card controls">
+        <aside id="upload-panel" className="card controls" aria-label="Upload and study controls">
+          <div className="panelHeader">
+            <p className="eyebrow">Step 1</p>
+            <h2>Load your study</h2>
+            <p className="hint">Drag in a portal download, MRI disc folder, archive, image export, or video export. Nothing leaves your browser until you ask AI.</p>
+          </div>
+
           <label
             className={`upload${isDragOver ? ' dragOver' : ''}`}
             onDragOver={(event) => {
@@ -493,12 +558,12 @@ export default function MriWorkspace() {
             onDragLeave={() => setIsDragOver(false)}
             onDrop={handleDrop}
           >
-            <span>{isParsing ? 'Reading images…' : 'Upload more DICOM, images, MP4/video, folder, CD export, or archive'}</span>
-            <small>Every upload is appended as additional series and saved locally in this browser with IndexedDB. Extensionless DICOM files, JPEG/PNG images, MP4 videos, and archives are accepted.</small>
+            <span>{isParsing ? 'Reading images…' : 'Drop MRI files here'}</span>
+            <small>or click to select DICOM, image/video exports, or .zip/.tar/.tgz/.gz archives</small>
             <input type="file" multiple accept=".dcm,.dicom,.ima,.jpg,.jpeg,.png,.bmp,.gif,.webp,.mp4,.m4v,.mov,.webm,.zip,.tar,.tgz,.gz,application/dicom,image/jpeg,image/png,image/bmp,image/gif,image/webp,video/mp4,video/quicktime,video/webm,application/zip,application/gzip" onChange={handleFiles} />
           </label>
           <label className="folderUpload">
-            Select a DICOM/image folder or mounted CD
+            Select an entire folder / mounted MRI CD
             <input
               type="file"
               multiple
@@ -506,15 +571,30 @@ export default function MriWorkspace() {
               {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
             />
           </label>
-          <button className="secondary" type="button" onClick={resetWorkspace} disabled={isParsing || isAnalyzing || (!series.length && !annotations.length)}>
-            Clear local study
-          </button>
+
+          <div className="helperCard">
+            <strong>Tip</strong>
+            <span>If you are unsure what to upload, choose the whole exported folder or ZIP. ReadMRI will sort readable slices into series.</span>
+          </div>
+
           {uploadSummary && <p className="hint uploadSummary">{uploadSummary}</p>}
           {(storageMessage || isRestoring) && <p className="hint uploadSummary">{isRestoring ? 'Checking local browser storage…' : storageMessage}</p>}
 
+          <button className="secondary dangerAction" type="button" onClick={resetWorkspace} disabled={isParsing || isAnalyzing || (!series.length && !annotations.length)}>
+            Clear local study
+          </button>
+
+          <div className="divider" />
+
+          <div className="panelHeader compact">
+            <p className="eyebrow">Step 2</p>
+            <h2>Navigate</h2>
+          </div>
+
           <div className="field">
-            <label>View one series</label>
+            <label htmlFor="series-select">Series to view</label>
             <select
+              id="series-select"
               value={activeSeries?.id ?? ''}
               onChange={(event) => {
                 setActiveSeriesId(event.target.value);
@@ -531,8 +611,12 @@ export default function MriWorkspace() {
           </div>
 
           <div className="field">
-            <label>Slice {activeSeries ? `${sliceIndex + 1} / ${activeSeries.slices.length}` : ''}</label>
+            <div className="fieldRow">
+              <label htmlFor="slice-range">Slice {activeSeries ? `${sliceIndex + 1} of ${activeSeries.slices.length}` : ''}</label>
+              <span className="keyboardHint">← / →</span>
+            </div>
             <input
+              id="slice-range"
               type="range"
               min="0"
               max={Math.max((activeSeries?.slices.length ?? 1) - 1, 0)}
@@ -540,49 +624,46 @@ export default function MriWorkspace() {
               onChange={(event) => setSliceIndex(Number(event.target.value))}
               disabled={!activeSeries}
             />
-          </div>
-
-          <div className="currentFrameAi">
-            <strong>AI vision scope: active frame + nearby context</strong>
-            <span>{activeSeries && activeSlice ? `${activeSeries.description} · slice ${sliceIndex + 1} · ${activeSlice.fileName}` : 'Upload and open a frame before asking AI.'}</span>
-            <small>AI focuses on the image you are viewing, can compare the slice just before/after, and can use the imported series list to suggest where to navigate next.</small>
-          </div>
-
-          <div className="field">
-            <label>Chat with AI / ask where to look next</label>
-            <textarea value={userQuestion} onChange={(event) => setUserQuestion(event.target.value)} placeholder="Example: I care about the deltoid ligament. Is this a useful slice, or should I move before/after or switch series?" />
-            <div className="quickPrompts">
-              <button type="button" onClick={() => setUserQuestion('I just imported the study. I want help finding the best series and slice range for the structure or symptom I mention. Based on the series list and current/adjacent frames, where should I go next?')}>Find best slice</button>
-              <button type="button" onClick={() => setUserQuestion('Is this current slice good enough for the area I care about, or should I move a few slices before/after? Please be specific.')}>Is this slice good?</button>
+            <div className="sliceButtons">
+              <button type="button" onClick={goToPreviousSlice} disabled={!activeSeries || sliceIndex === 0}>Previous</button>
+              <button type="button" onClick={goToNextSlice} disabled={!activeSeries || sliceIndex >= (activeSeries.slices.length - 1)}>Next</button>
             </div>
           </div>
 
-          <div className="field">
-            <label>Manual annotation label</label>
-            <input value={annotationDraft.label} onChange={(event) => setAnnotationDraft({ ...annotationDraft, label: event.target.value })} />
-          </div>
-          <div className="field">
-            <label>Manual question/note</label>
-            <textarea value={annotationDraft.note} onChange={(event) => setAnnotationDraft({ ...annotationDraft, note: event.target.value })} placeholder="Example: Is this tendon swollen?" />
-          </div>
-          <button className="primary" onClick={runAnalysis} disabled={!activeSlice || isAnalyzing}>
-            {isAnalyzing ? 'Analyzing frame + neighbors…' : 'Ask AI / get navigation help'}
-          </button>
-          <p className="hint">Click directly on the MRI image to drop an annotation first. You can also ask AI which series/slice range to try next, then navigate there and ask again.</p>
+          {series.length > 0 && (
+            <div className="seriesPicker">
+              <div className="seriesPickerHeader">
+                <strong>Include in AI study list</strong>
+                <button type="button" onClick={() => setSelectedSeriesIds(series.map((item) => item.id))}>All</button>
+                <button type="button" onClick={() => setSelectedSeriesIds(activeSeries ? [activeSeries.id] : [])}>Current</button>
+              </div>
+              {series.map((item) => (
+                <label className="seriesCheck" key={item.id}>
+                  <input
+                    type="checkbox"
+                    checked={selectedSeriesIds.includes(item.id)}
+                    onChange={(event) => setSelectedSeriesIds((existing) => (event.target.checked ? [...existing, item.id] : existing.filter((id) => id !== item.id)))}
+                  />
+                  <span>{item.description}<small>{item.plane} · {item.slices.length} slices</small></span>
+                </label>
+              ))}
+            </div>
+          )}
         </aside>
 
-        <section className="card viewer">
+        <section id="viewer-panel" className="card viewer" aria-label="MRI image viewer">
           {activeSlice ? (
             <>
               <div className="viewerHeader">
                 <div>
+                  <p className="eyebrow">Current frame</p>
                   <h2>{activeSeries?.description}</h2>
                   <p>{activeSeries?.plane} · {activeSeries?.sequenceName || 'sequence not labeled'} · {activeSlice.rows}×{activeSlice.columns}</p>
                 </div>
                 <span className="badge">Slice {sliceIndex + 1}: {activeSlice.fileName}</span>
               </div>
-              <div className="imageStage" onClick={addAnnotation} role="button" tabIndex={0} aria-label="MRI slice annotation canvas">
-                <img ref={imageRef} src={activeSlice.canvasDataUrl} alt="Rendered DICOM MRI slice" draggable={false} decoding="async" fetchPriority="high" />
+              <div className="imageStage" onClick={addAnnotation} role="button" tabIndex={0} aria-label="MRI slice annotation canvas. Click the image to add a note.">
+                <img ref={imageRef} src={activeSlice.canvasDataUrl} alt="Rendered MRI slice" draggable={false} decoding="async" fetchPriority="high" />
                 {visibleAnnotations.map((annotation) => (
                   <div
                     key={annotation.id}
@@ -605,13 +686,18 @@ export default function MriWorkspace() {
                   </div>
                 ))}
               </div>
+              <div className="viewerFooter">
+                <span>Click the image to add your note.</span>
+                <span>Drag labels to reposition.</span>
+                <span>Use arrow keys to scan slices.</span>
+              </div>
               {visibleAnnotations.length > 0 && (
                 <div className="annotationList">
                   {visibleAnnotations.map((annotation) => (
                     <div className="annotationItem" key={annotation.id}>
                       <button type="button" onClick={() => jumpToReference({ seriesId: annotation.seriesId, sliceIndex: annotation.sliceIndex })}>
                         <strong>{annotation.source === 'ai' ? 'AI' : 'You'}: {annotation.label}</strong>
-                        <small>{annotation.note || 'No note'} · Drag the label on the image to move it.</small>
+                        <small>{annotation.note || 'No note'} · slice {annotation.sliceIndex + 1}</small>
                       </button>
                       <button className="deleteAnnotation" type="button" onClick={() => deleteAnnotation(annotation.id)} aria-label={`Delete annotation ${annotation.label}`}>Delete</button>
                     </div>
@@ -620,54 +706,97 @@ export default function MriWorkspace() {
               )}
             </>
           ) : (
-            <div className="empty">Upload individual DICOM files, JPEG/PNG image exports, an MP4/video export, drag a series folder/CD export, or pick a compressed .zip/.tar/.tgz archive from your MRI disc/export.</div>
+            <div className="empty">
+              <div>
+                <p className="eyebrow">No study loaded yet</p>
+                <h2>Start by dropping your MRI export on the upload panel.</h2>
+                <p>DICOM files, common image exports, videos, folders, CDs, and archives are supported.</p>
+              </div>
+            </div>
           )}
         </section>
 
-        <aside className="card analysis">
-          <div className="sectionTitle">
-            <p className="eyebrow">AI explanation</p>
-            <h2>Guided frame chat</h2>
+        <aside id="ai-panel" className="card analysis" aria-label="AI explanation and notes">
+          <div className="panelHeader">
+            <p className="eyebrow">Step 3</p>
+            <h2>Ask in plain language</h2>
+            <p className="hint">AI uses the current frame, nearby slices, your visible notes, and the series list to explain anatomy and suggest questions.</p>
           </div>
           <p className="notice">{analysis.safetyNotice}</p>
+
+          <div className="currentFrameAi">
+            <strong>Review scope</strong>
+            <span>{activeSeries && activeSlice ? `${activeSeries.description} · slice ${sliceIndex + 1} · ${activeSlice.fileName}` : 'Upload and open a frame before asking AI.'}</span>
+            <small>For best results, mark the exact area you care about before asking.</small>
+          </div>
+
+          <div className="field">
+            <label htmlFor="annotation-label">Note label</label>
+            <input id="annotation-label" value={annotationDraft.label} onChange={(event) => setAnnotationDraft({ ...annotationDraft, label: event.target.value })} />
+          </div>
+          <div className="field">
+            <label htmlFor="annotation-note">Question or note for the image</label>
+            <textarea id="annotation-note" value={annotationDraft.note} onChange={(event) => setAnnotationDraft({ ...annotationDraft, note: event.target.value })} placeholder="Example: Is this tendon swollen?" />
+          </div>
+
+          <div className="field">
+            <label htmlFor="ai-question">What do you want help with?</label>
+            <textarea id="ai-question" value={userQuestion} onChange={(event) => setUserQuestion(event.target.value)} placeholder="Example: I care about the deltoid ligament. Is this a useful slice, or should I move before/after or switch series?" />
+            <div className="quickPrompts">
+              {exampleQuestions.map((prompt) => (
+                <button key={prompt} type="button" onClick={() => setUserQuestion(prompt)}>{prompt}</button>
+              ))}
+            </div>
+          </div>
+
+          <button className="primary" onClick={runAnalysis} disabled={!activeSlice || isAnalyzing}>
+            {isAnalyzing ? 'Analyzing this frame…' : 'Ask AI about this frame'}
+          </button>
           {analysisStatus && <p className={error ? 'analysisStatus error' : 'analysisStatus'}>{analysisStatus}</p>}
+
           {aiChatHistory.length > 0 && (
             <div className="chatHistory">
               <div className="chatHistoryHeader">
-                <h3>Frame chat memory</h3>
-                <button type="button" onClick={() => setAiChatHistory([])}>Clear chat</button>
+                <h3>Recent frame chat</h3>
+                <button type="button" onClick={() => setAiChatHistory([])}>Clear</button>
               </div>
               {aiChatHistory.slice(-6).map((message) => (
                 <p key={message.id} className={`chatBubble ${message.role}`}>
                   <strong>{message.role === 'user' ? 'You' : 'AI'}</strong>
                   <span>{message.text}</span>
-                  {message.seriesId && typeof message.sliceIndex === 'number' && <small>Frame: slice {message.sliceIndex + 1}</small>}
+                  {message.seriesId && typeof message.sliceIndex === 'number' && <small>Slice {message.sliceIndex + 1}</small>}
                 </p>
               ))}
             </div>
           )}
-          <h3>Summary</h3>
-          <p>{analysis.summary}</p>
-          <h3>Possible findings / discussion points</h3>
-          {analysis.findings.length ? analysis.findings.map((finding, findingIndex) => (
-            <article className="finding" key={`${finding.region}-${findingIndex}`}>
-              <strong>{finding.region} <span>{finding.confidence}</span></strong>
-              <p>{finding.plainLanguage}</p>
-              <small>{finding.whyItMatters} Follow-up: {finding.suggestedFollowUp}</small>
-              {finding.references?.length > 0 && (
-                <div className="references">
-                  <b>Referenced images</b>
-                  {finding.references.map((reference) => (
-                    <button key={`${findingIndex}-${reference.seriesId}-${reference.sliceIndex}-${reference.label}`} type="button" onClick={() => jumpToReference(reference)}>
-                      {reference.label || referenceLabel(reference)}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </article>
-          )) : <p className="muted">No AI findings yet. Open a frame, optionally mark an area, then ask about this image or ask which series/slice range to try next.</p>}
+
+          <div className="resultBlock">
+            <h3>Summary</h3>
+            <p>{analysis.summary}</p>
+          </div>
+          <div className="resultBlock">
+            <h3>Possible findings / discussion points</h3>
+            {analysis.findings.length ? analysis.findings.map((finding, findingIndex) => (
+              <article className="finding" key={`${finding.region}-${findingIndex}`}>
+                <strong>{finding.region} <span>{finding.confidence}</span></strong>
+                <p>{finding.plainLanguage}</p>
+                <small>{finding.whyItMatters} Follow-up: {finding.suggestedFollowUp}</small>
+                {finding.references?.length > 0 && (
+                  <div className="references">
+                    <b>Referenced images</b>
+                    {finding.references.map((reference) => (
+                      <button key={`${findingIndex}-${reference.seriesId}-${reference.sliceIndex}-${reference.label}`} type="button" onClick={() => jumpToReference(reference)}>
+                        {reference.label || referenceLabel(reference)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </article>
+            )) : <p className="muted">No AI findings yet. Open a frame, optionally mark an area, then ask about this image or ask which series/slice range to try next.</p>}
+          </div>
+
           {analysis.referencedAnnotations?.length > 0 && (
-            <>
+            <div className="resultBlock">
               <h3>AI callouts</h3>
               <div className="references">
                 {analysis.referencedAnnotations.map((annotation) => {
@@ -679,25 +808,30 @@ export default function MriWorkspace() {
                   );
                 })}
               </div>
-            </>
+            </div>
           )}
-          <h3>Questions for your clinician</h3>
-          <ul>{analysis.questionsForDoctor.map((question) => <li key={question}>{question}</li>)}</ul>
+
+          <div className="resultBlock">
+            <h3>Questions for your clinician</h3>
+            <ul>{analysis.questionsForDoctor.map((question) => <li key={question}>{question}</li>)}</ul>
+          </div>
           {analysis.limitations.length > 0 && (
-            <>
+            <div className="resultBlock">
               <h3>Limitations</h3>
               <ul>{analysis.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}</ul>
-            </>
+            </div>
           )}
         </aside>
       </section>
 
       <section className="lowerGrid">
         <div className="card">
+          <p className="eyebrow">Reference</p>
           <h2>Ankle MRI checklist</h2>
           <div className="checklist">{ankleChecklist.map((item) => <span key={item}>{item}</span>)}</div>
         </div>
         <div className="card">
+          <p className="eyebrow">Reference</p>
           <h2>Plain-language glossary</h2>
           <div className="glossary">{patientFriendlyGlossary.map((item) => <p key={item.term}><strong>{item.term}:</strong> {item.explanation}</p>)}</div>
         </div>
@@ -705,6 +839,7 @@ export default function MriWorkspace() {
 
       {(warnings.length > 0 || error) && (
         <section className="card messages">
+          <h2>Import and app messages</h2>
           {error && <p className="error">{error}</p>}
           {warnings.map((warning) => <p key={warning}>{warning}</p>)}
         </section>
