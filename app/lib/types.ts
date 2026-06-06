@@ -73,3 +73,12 @@ export type AiAnalysis = {
   limitations: string[];
   referencedAnnotations: Annotation[];
 };
+
+export type AiChatMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  createdAt: string;
+  seriesId?: string;
+  sliceIndex?: number;
+};
