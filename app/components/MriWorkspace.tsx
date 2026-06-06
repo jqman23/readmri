@@ -131,6 +131,7 @@ export default function MriWorkspace() {
   const [isDragOver, setIsDragOver] = useState(false);
   const imageRef = useRef<HTMLImageElement>(null);
   const draggedAnnotationIdRef = useRef<string | null>(null);
+  const latestViewStateRef = useRef({ activeSeriesId: '', sliceIndex: 0 });
 
   const activeSeries = useMemo(
     () => series.find((item) => item.id === activeSeriesId) ?? series[0],
@@ -140,6 +141,20 @@ export default function MriWorkspace() {
   const visibleAnnotations = annotations.filter(
     (annotation) => annotation.seriesId === activeSeries?.id && annotation.sliceIndex === sliceIndex,
   );
+
+  useEffect(() => {
+    latestViewStateRef.current = { activeSeriesId: activeSeries?.id ?? activeSeriesId, sliceIndex };
+  }, [activeSeries?.id, activeSeriesId, sliceIndex]);
+
+  useEffect(() => {
+    if (!activeSeries) return;
+    [sliceIndex - 1, sliceIndex + 1]
+      .filter((candidateIndex) => candidateIndex >= 0 && candidateIndex < activeSeries.slices.length)
+      .forEach((candidateIndex) => {
+        const image = new Image();
+        image.src = activeSeries.slices[candidateIndex].canvasDataUrl;
+      });
+  }, [activeSeries, sliceIndex]);
 
   useEffect(() => {
     let canceled = false;
@@ -174,22 +189,23 @@ export default function MriWorkspace() {
   useEffect(() => {
     if (!isHydrated) return;
     const timeoutId = window.setTimeout(() => {
+      const latestViewState = latestViewStateRef.current;
       savePersistedWorkspace({
         series,
         annotations,
         analysis,
-        activeSeriesId: activeSeries?.id ?? activeSeriesId,
-        sliceIndex,
+        activeSeriesId: latestViewState.activeSeriesId,
+        sliceIndex: latestViewState.sliceIndex,
         selectedSeriesIds,
         uploadSummary,
         userQuestion,
         aiChatHistory,
         savedAt: new Date().toISOString(),
       }).catch((storageError) => setWarnings((existing) => [...existing, storageError instanceof Error ? storageError.message : 'Unable to save this study in local browser storage.']));
-    }, 450);
+    }, 900);
 
     return () => window.clearTimeout(timeoutId);
-  }, [activeSeries?.id, activeSeriesId, aiChatHistory, analysis, annotations, isHydrated, selectedSeriesIds, series, sliceIndex, uploadSummary, userQuestion]);
+  }, [aiChatHistory, analysis, annotations, isHydrated, selectedSeriesIds, series, uploadSummary, userQuestion]);
 
   const loadFiles = async (incomingFiles: UploadFile[]) => {
     setIsParsing(true);
@@ -344,7 +360,7 @@ export default function MriWorkspace() {
     if (!activeSeries || !activeSlice) return;
     setIsAnalyzing(true);
     setError('');
-    setAnalysisStatus(`Sending current frame: ${activeSeries.description} slice ${sliceIndex + 1}...`);
+    setAnalysisStatus(`Sending current frame with adjacent-slice context: ${activeSeries.description} slice ${sliceIndex + 1}...`);
 
     const questionText = userQuestion.trim() || 'Explain this current MRI frame in plain language.';
     const userMessage: AiChatMessage = {
@@ -358,6 +374,18 @@ export default function MriWorkspace() {
 
     try {
       const aiImageDataUrl = await makeAiImageDataUrl(activeSlice.canvasDataUrl);
+      const contextSlices = [sliceIndex - 1, sliceIndex + 1]
+        .filter((candidateIndex) => candidateIndex >= 0 && candidateIndex < activeSeries.slices.length)
+        .map((candidateIndex) => ({ slice: activeSeries.slices[candidateIndex], sliceIndex: candidateIndex }));
+      const contextFrames = await Promise.all(contextSlices.map(async ({ slice, sliceIndex: contextSliceIndex }) => ({
+        imageId: `context-slice-${contextSliceIndex}`,
+        seriesId: activeSeries.id,
+        seriesDescription: activeSeries.description,
+        sliceIndex: contextSliceIndex,
+        fileName: slice.fileName,
+        instanceNumber: slice.instanceNumber,
+        dataUrl: await makeAiImageDataUrl(slice.canvasDataUrl),
+      })));
       const frameAnnotations = annotations.filter((annotation) => annotation.seriesId === activeSeries.id && annotation.sliceIndex === sliceIndex);
       const response = await fetch('/api/analyze', {
         method: 'POST',
@@ -379,6 +407,13 @@ export default function MriWorkspace() {
             },
           },
           annotations: frameAnnotations,
+          studySeries: series.map((item) => ({
+            id: item.id,
+            description: item.description,
+            sequenceName: item.sequenceName,
+            plane: item.plane,
+            sliceCount: item.slices.length,
+          })),
           currentFrame: {
             imageId: 'current-frame',
             seriesId: activeSeries.id,
@@ -388,6 +423,7 @@ export default function MriWorkspace() {
             instanceNumber: activeSlice.instanceNumber,
             dataUrl: aiImageDataUrl,
           },
+          contextFrames,
           chatHistory: aiChatHistory,
         }),
       });
@@ -416,7 +452,7 @@ export default function MriWorkspace() {
       setAiChatHistory((existing) => [...existing, userMessage, assistantMessage].slice(-24));
       setAnalysisStatus(normalizedAnalysis.limitations?.some((limitation) => limitation.includes('No configured AI model'))
         ? 'AI is not configured yet, so ReadMRI showed safe placeholder guidance instead of image interpretation.'
-        : `AI answered using only current frame ${activeSeries.description} slice ${sliceIndex + 1}.`);
+        : `AI answered using current frame ${activeSeries.description} slice ${sliceIndex + 1} plus adjacent-slice context when available.`);
       setAnnotations((existing) => [
         ...existing.filter((annotation) => !(annotation.source === 'ai' && annotation.seriesId === activeSeries.id && annotation.sliceIndex === sliceIndex)),
         ...normalizedAiAnnotations,
@@ -437,7 +473,7 @@ export default function MriWorkspace() {
           <p className="eyebrow">Ankle + foot MRI education workspace</p>
           <h1>ReadMRI helps non-experts explore multiple MRI series.</h1>
           <p className="lede">
-            Import DICOM/image/video MRI data, view one slice at a time, mark the exact area you care about, and chat with AI that inspects only the currently active frame while remembering your conversation.
+            Import DICOM/image/video MRI data, view one slice at a time, mark the exact area you care about, and chat with AI that focuses on the active frame while using nearby slices and series metadata to guide where to look next.
           </p>
         </div>
         <div className="safety">
@@ -507,14 +543,18 @@ export default function MriWorkspace() {
           </div>
 
           <div className="currentFrameAi">
-            <strong>AI vision scope: current frame only</strong>
+            <strong>AI vision scope: active frame + nearby context</strong>
             <span>{activeSeries && activeSlice ? `${activeSeries.description} · slice ${sliceIndex + 1} · ${activeSlice.fileName}` : 'Upload and open a frame before asking AI.'}</span>
-            <small>Chat memory is saved, but each AI request visually inspects only the active image on screen plus your annotations on that image.</small>
+            <small>AI focuses on the image you are viewing, can compare the slice just before/after, and can use the imported series list to suggest where to navigate next.</small>
           </div>
 
           <div className="field">
-            <label>Chat with AI about this frame</label>
-            <textarea value={userQuestion} onChange={(event) => setUserQuestion(event.target.value)} placeholder="Example: Is the area I marked near the tendon or bone? What should I ask my clinician?" />
+            <label>Chat with AI / ask where to look next</label>
+            <textarea value={userQuestion} onChange={(event) => setUserQuestion(event.target.value)} placeholder="Example: I care about the deltoid ligament. Is this a useful slice, or should I move before/after or switch series?" />
+            <div className="quickPrompts">
+              <button type="button" onClick={() => setUserQuestion('I just imported the study. I want help finding the best series and slice range for the structure or symptom I mention. Based on the series list and current/adjacent frames, where should I go next?')}>Find best slice</button>
+              <button type="button" onClick={() => setUserQuestion('Is this current slice good enough for the area I care about, or should I move a few slices before/after? Please be specific.')}>Is this slice good?</button>
+            </div>
           </div>
 
           <div className="field">
@@ -526,9 +566,9 @@ export default function MriWorkspace() {
             <textarea value={annotationDraft.note} onChange={(event) => setAnnotationDraft({ ...annotationDraft, note: event.target.value })} placeholder="Example: Is this tendon swollen?" />
           </div>
           <button className="primary" onClick={runAnalysis} disabled={!activeSlice || isAnalyzing}>
-            {isAnalyzing ? 'Analyzing current frame…' : 'Ask AI about current frame'}
+            {isAnalyzing ? 'Analyzing frame + neighbors…' : 'Ask AI / get navigation help'}
           </button>
-          <p className="hint">Click directly on the MRI image to drop an annotation first. AI answers can add yellow callouts, but only on the current frame.</p>
+          <p className="hint">Click directly on the MRI image to drop an annotation first. You can also ask AI which series/slice range to try next, then navigate there and ask again.</p>
         </aside>
 
         <section className="card viewer">
@@ -542,7 +582,7 @@ export default function MriWorkspace() {
                 <span className="badge">Slice {sliceIndex + 1}: {activeSlice.fileName}</span>
               </div>
               <div className="imageStage" onClick={addAnnotation} role="button" tabIndex={0} aria-label="MRI slice annotation canvas">
-                <img ref={imageRef} src={activeSlice.canvasDataUrl} alt="Rendered DICOM MRI slice" draggable={false} />
+                <img ref={imageRef} src={activeSlice.canvasDataUrl} alt="Rendered DICOM MRI slice" draggable={false} decoding="async" fetchPriority="high" />
                 {visibleAnnotations.map((annotation) => (
                   <div
                     key={annotation.id}
@@ -587,7 +627,7 @@ export default function MriWorkspace() {
         <aside className="card analysis">
           <div className="sectionTitle">
             <p className="eyebrow">AI explanation</p>
-            <h2>Current-frame chat support</h2>
+            <h2>Guided frame chat</h2>
           </div>
           <p className="notice">{analysis.safetyNotice}</p>
           {analysisStatus && <p className={error ? 'analysisStatus error' : 'analysisStatus'}>{analysisStatus}</p>}
@@ -625,7 +665,7 @@ export default function MriWorkspace() {
                 </div>
               )}
             </article>
-          )) : <p className="muted">No AI findings yet. Open a frame, optionally mark an area, then ask about the current image.</p>}
+          )) : <p className="muted">No AI findings yet. Open a frame, optionally mark an area, then ask about this image or ask which series/slice range to try next.</p>}
           {analysis.referencedAnnotations?.length > 0 && (
             <>
               <h3>AI callouts</h3>
