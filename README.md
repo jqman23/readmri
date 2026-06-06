@@ -8,7 +8,8 @@ ReadMRI is a Vercel-ready Next.js prototype for patient-friendly ankle/foot MRI 
 - Renders uncompressed grayscale MR slices, browser-decoded JPEG/PNG exports, and browser-decoded video frames to canvas-backed PNGs for review.
 - Lets users move through slices, switch series, and drop annotations/questions on the MRI image.
 - Sends representative rendered slices, metadata, and annotations to a server API for an AI explanation.
-- Keeps the AI response educational: it must state limitations, avoid diagnosis, and generate questions for a clinician.
+- Adds a study-scout workflow that first ranks series by names/planes/sequences, samples up to 20 candidate slices, reviews them in Groq-friendly batches of 5 images, and returns jump links to promising slices.
+- Keeps the AI response exploratory and useful for report-backed learning while still avoiding autonomous diagnosis.
 
 ## AI choice
 
@@ -16,7 +17,7 @@ The app can use either Groq or OpenAI through server-side environment variables.
 
 The default Groq vision model is `meta-llama/llama-4-scout-17b-16e-instruct`; the default OpenAI model is `gpt-4.1`. You can also use the backward-compatible `AI_MODEL` variable if a provider-specific model is not set.
 
-Important: current general-purpose multimodal models are not approved replacements for radiologists and should not be used as autonomous diagnostic systems.
+Important: current general-purpose multimodal models are not approved replacements for radiologists and should not be used as autonomous diagnostic systems. ReadMRI's scout mode is meant to help patients who already have a report or clinician guidance navigate toward relevant images for discussion.
 
 ## Local development
 
