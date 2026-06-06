@@ -123,6 +123,8 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 .currentFrameAi span { color: #dbeafe; font-size: 0.9rem; font-weight: 800; line-height: 1.45; }
 .currentFrameAi small { color: var(--muted); line-height: 1.45; }
 .quickPrompts { display: grid; gap: 8px; margin-top: 8px; }
+.aiActionStack { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+.aiActionStack .secondary { background: rgba(15, 23, 42, 0.72); color: #bae6fd; }
 .quickPrompts button { border-radius: 12px; color: #bae6fd; font-size: 0.8rem; padding: 8px 10px; text-align: left; line-height: 1.35; }
 .resultBlock { border-top: 1px solid rgba(148, 163, 184, 0.14); margin-top: 18px; padding-top: 4px; }
 .finding { padding: 14px; border: 1px solid var(--line); border-radius: 16px; margin-bottom: 12px; background: rgba(15, 23, 42, 0.75); }
@@ -170,6 +172,7 @@ li { margin: 8px 0; line-height: 1.45; }
   .hero { padding: 22px; }
   .statusStrip { grid-template-columns: repeat(2, 1fr); }
   .viewerHeader { display: grid; }
+  .aiActionStack { grid-template-columns: 1fr; }
   .badge { max-width: 100%; white-space: normal; }
   .imageStage { min-height: 420px; }
   .empty { min-height: 420px; }

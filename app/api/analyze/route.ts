@@ -439,9 +439,9 @@ export async function POST(request: NextRequest) {
   };
 
   const userText = [
-    'Mode: guided single-slice MRI chat. The current frame is the main image; adjacent context frames may be used ONLY to orient anatomy, compare continuity, or suggest moving a few slices.',
-    'Make the most of the visible images: describe useful anatomy/patterns instead of stopping at generic uncertainty. If the current frame is not ideal, say exactly whether to move before/after or switch series.',
-    'Use chat history only as conversation memory, not as visible evidence. If the user asks to find the best image after importing all series, use the study series inventory plus current/adjacent frames to recommend a concrete series and approximate slice range, then ask them to navigate there for focused review.',
+    'Mode: curious MRI navigation partner. The current frame is the main image; adjacent/context frames may also be compared when supplied, including study-scout batches of candidate slices.',
+    'Be more direct and useful than a generic disclaimer: describe visible anatomy/patterns, rank candidate images when asked, and give concrete next navigation steps such as series name and slice number.',
+    'Use chat history as conversation memory. If the user asks to find a report-backed finding after importing all series, use the study series inventory plus supplied candidate frames to recommend concrete series/slices for focused review.',
     `User question: ${payload.question}`,
     `Current frame metadata: ${JSON.stringify(frameReference)}`,
     `Adjacent/context frame metadata: ${JSON.stringify(contextFrameReferences)}`,
@@ -452,7 +452,7 @@ export async function POST(request: NextRequest) {
     `Return ONLY JSON matching this contract: ${JSON.stringify(responseContract)}`,
     'Every visible-image finding must reference either the current frame or one supplied adjacent context frame exactly. Do not invent or reference unsupplied images.',
     'When helpful, add referencedAnnotations with percentage x/y coordinates and optional width/height so the UI can draw yellow callouts on the CURRENT frame only.',
-    'Be conservative. A single frame can explain anatomy and visible patterns, but it cannot replace full DICOM stack review, the radiology report, or clinical exam.',
+    'Stay honest about uncertainty, but do not be timid: the user wants an exploratory partner for understanding an existing report. Never claim a definitive diagnosis; do point out plausible visual clues and better slices to inspect.',
   ].join('\n');
 
   try {

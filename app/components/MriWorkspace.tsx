@@ -15,10 +15,13 @@ const annotationColors = ['#38bdf8', '#f97316', '#a3e635', '#f472b6', '#facc15']
 const AI_COLOR = '#facc15';
 const MAX_AI_IMAGE_SIDE = 768;
 const AI_IMAGE_JPEG_QUALITY = 0.82;
+const SCOUT_MAX_CANDIDATES = 20;
+const SCOUT_BATCH_SIZE = 5;
 
 const exampleQuestions = [
   'Explain this slice in plain English and tell me what anatomy I am looking at.',
   'Help me find the best series and slice range for the painful area I describe.',
+  'Scout the whole study for slices that might help me understand the deltoid ligament region.',
   'What should I ask my clinician about this area and what are the limits of this image?',
 ];
 
@@ -113,6 +116,96 @@ function createDefaultAnalysis(): AiAnalysis {
 
 function referenceLabel(reference: AiImageReference) {
   return `${reference.seriesDescription} · slice ${reference.sliceIndex + 1} · ${reference.fileName}`;
+}
+
+type ScoutCandidate = {
+  series: DicomSeries;
+  slice: DicomSlice;
+  sliceIndex: number;
+  score: number;
+  reason: string;
+};
+
+function includesAny(text: string, terms: string[]) {
+  return terms.some((term) => text.includes(term));
+}
+
+function scoreSeriesForQuestion(item: DicomSeries, question: string) {
+  const haystack = `${item.description} ${item.sequenceName} ${item.plane}`.toLowerCase();
+  const lowerQuestion = question.toLowerCase();
+  let score = 0;
+  const reasons: string[] = [];
+
+  if (includesAny(haystack, ['t2', 'stir', 'fs', 'fat sat', 'fatsat', 'pd'])) {
+    score += 5;
+    reasons.push('fluid-sensitive sequence');
+  }
+  if (includesAny(haystack, ['cor', 'coronal']) || item.plane === 'coronal') {
+    score += 4;
+    reasons.push('coronal plane');
+  }
+  if (includesAny(haystack, ['ax', 'axial']) || item.plane === 'axial') {
+    score += 3;
+    reasons.push('axial plane');
+  }
+  if (includesAny(haystack, ['sag', 'sagittal']) || item.plane === 'sagittal') {
+    score += 1;
+    reasons.push('sagittal backup view');
+  }
+  if (includesAny(haystack, ['ankle', 'foot'])) {
+    score += 2;
+    reasons.push('ankle/foot labeled');
+  }
+  if (includesAny(lowerQuestion, ['deltoid', 'medial', 'spring ligament'])) {
+    if (item.plane === 'coronal' || includesAny(haystack, ['cor', 'coronal'])) score += 4;
+    if (item.plane === 'axial' || includesAny(haystack, ['ax', 'axial'])) score += 2;
+    reasons.push('question mentions medial/deltoid region');
+  }
+
+  return { score, reason: reasons.length ? Array.from(new Set(reasons)).join(', ') : 'metadata fallback sample' };
+}
+
+function sampleSliceIndexes(sliceCount: number, desiredCount: number) {
+  if (sliceCount <= 0 || desiredCount <= 0) return [];
+  if (sliceCount <= desiredCount) return Array.from({ length: sliceCount }, (_, index) => index);
+
+  const margin = sliceCount > 8 ? 2 : 0;
+  const start = margin;
+  const end = sliceCount - 1 - margin;
+  const indexes = new Set<number>();
+  for (let index = 0; index < desiredCount; index += 1) {
+    const ratio = desiredCount === 1 ? 0.5 : index / (desiredCount - 1);
+    indexes.add(Math.min(sliceCount - 1, Math.max(0, Math.round(start + (end - start) * ratio))));
+  }
+
+  return Array.from(indexes).sort((a, b) => a - b);
+}
+
+function buildScoutCandidates(allSeries: DicomSeries[], selectedIds: string[], question: string): ScoutCandidate[] {
+  const selectedSeries = allSeries.filter((item) => selectedIds.includes(item.id));
+  const scopedSeries = selectedSeries.length ? selectedSeries : allSeries;
+  const scoredSeries = scopedSeries
+    .map((item) => ({ ...scoreSeriesForQuestion(item, question), series: item }))
+    .sort((a, b) => b.score - a.score || b.series.slices.length - a.series.slices.length);
+
+  const topSeries = scoredSeries.slice(0, Math.min(4, scoredSeries.length));
+  const perSeriesCount = Math.max(2, Math.ceil(SCOUT_MAX_CANDIDATES / Math.max(1, topSeries.length)));
+
+  return topSeries.flatMap((item) => sampleSliceIndexes(item.series.slices.length, perSeriesCount).map((candidateIndex) => ({
+    series: item.series,
+    slice: item.series.slices[candidateIndex],
+    sliceIndex: candidateIndex,
+    score: item.score,
+    reason: item.reason,
+  }))).slice(0, SCOUT_MAX_CANDIDATES);
+}
+
+function chunkCandidates(candidates: ScoutCandidate[], chunkSize: number) {
+  const chunks: ScoutCandidate[][] = [];
+  for (let index = 0; index < candidates.length; index += chunkSize) {
+    chunks.push(candidates.slice(index, index + chunkSize));
+  }
+  return chunks;
 }
 
 export default function MriWorkspace() {
@@ -391,6 +484,78 @@ export default function MriWorkspace() {
     .find((item) => item.id === seriesId)
     ?.slices[targetSliceIndex];
 
+  const selectedStudySeries = () => series.filter((item) => selectedSeriesIds.includes(item.id)).map((item) => ({
+    id: item.id,
+    description: item.description,
+    sequenceName: item.sequenceName,
+    plane: item.plane,
+    sliceCount: item.slices.length,
+  }));
+
+  const requestAnalysis = async ({
+    questionText,
+    primarySeries,
+    primarySlice,
+    primarySliceIndex,
+    contextCandidates,
+    frameAnnotations,
+  }: {
+    questionText: string;
+    primarySeries: DicomSeries;
+    primarySlice: DicomSlice;
+    primarySliceIndex: number;
+    contextCandidates: Array<{ series: DicomSeries; slice: DicomSlice; sliceIndex: number; imageId: string }>;
+    frameAnnotations: Annotation[];
+  }) => {
+    const contextFrames = await Promise.all(contextCandidates.slice(0, 4).map(async ({ series: contextSeries, slice, sliceIndex: contextSliceIndex, imageId }) => ({
+      imageId,
+      seriesId: contextSeries.id,
+      seriesDescription: contextSeries.description,
+      sliceIndex: contextSliceIndex,
+      fileName: slice.fileName,
+      instanceNumber: slice.instanceNumber,
+      dataUrl: await makeAiImageDataUrl(slice.canvasDataUrl),
+    })));
+
+    const response = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: questionText,
+        series: {
+          id: primarySeries.id,
+          description: primarySeries.description,
+          sequenceName: primarySeries.sequenceName,
+          plane: primarySeries.plane,
+          sliceCount: primarySeries.slices.length,
+          metadata: {
+            bodyPartExamined: primarySlice.bodyPartExamined,
+            studyDescription: primarySlice.studyDescription,
+            pixelSpacing: primarySlice.pixelSpacing,
+            windowCenter: primarySlice.windowCenter,
+            windowWidth: primarySlice.windowWidth,
+          },
+        },
+        annotations: frameAnnotations,
+        studySeries: selectedStudySeries(),
+        currentFrame: {
+          imageId: 'current-frame',
+          seriesId: primarySeries.id,
+          seriesDescription: primarySeries.description,
+          sliceIndex: primarySliceIndex,
+          fileName: primarySlice.fileName,
+          instanceNumber: primarySlice.instanceNumber,
+          dataUrl: await makeAiImageDataUrl(primarySlice.canvasDataUrl),
+        },
+        contextFrames,
+        chatHistory: aiChatHistory,
+      }),
+    });
+    const json = await readJsonResponse(response);
+    if (!response.ok) throw new Error(getAnalyzeError(json));
+    return getAnalyzeResult(json);
+  };
+
   const runAnalysis = async () => {
     if (!activeSeries || !activeSlice) return;
     setIsAnalyzing(true);
@@ -408,63 +573,23 @@ export default function MriWorkspace() {
     };
 
     try {
-      const aiImageDataUrl = await makeAiImageDataUrl(activeSlice.canvasDataUrl);
-      const contextSlices = [sliceIndex - 1, sliceIndex + 1]
+      const contextCandidates = [sliceIndex - 1, sliceIndex + 1]
         .filter((candidateIndex) => candidateIndex >= 0 && candidateIndex < activeSeries.slices.length)
-        .map((candidateIndex) => ({ slice: activeSeries.slices[candidateIndex], sliceIndex: candidateIndex }));
-      const contextFrames = await Promise.all(contextSlices.map(async ({ slice, sliceIndex: contextSliceIndex }) => ({
-        imageId: `context-slice-${contextSliceIndex}`,
-        seriesId: activeSeries.id,
-        seriesDescription: activeSeries.description,
-        sliceIndex: contextSliceIndex,
-        fileName: slice.fileName,
-        instanceNumber: slice.instanceNumber,
-        dataUrl: await makeAiImageDataUrl(slice.canvasDataUrl),
-      })));
+        .map((candidateIndex) => ({
+          series: activeSeries,
+          slice: activeSeries.slices[candidateIndex],
+          sliceIndex: candidateIndex,
+          imageId: `context-slice-${candidateIndex}`,
+        }));
       const frameAnnotations = annotations.filter((annotation) => annotation.seriesId === activeSeries.id && annotation.sliceIndex === sliceIndex);
-      const response = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          question: questionText,
-          series: {
-            id: activeSeries.id,
-            description: activeSeries.description,
-            sequenceName: activeSeries.sequenceName,
-            plane: activeSeries.plane,
-            sliceCount: activeSeries.slices.length,
-            metadata: {
-              bodyPartExamined: activeSlice.bodyPartExamined,
-              studyDescription: activeSlice.studyDescription,
-              pixelSpacing: activeSlice.pixelSpacing,
-              windowCenter: activeSlice.windowCenter,
-              windowWidth: activeSlice.windowWidth,
-            },
-          },
-          annotations: frameAnnotations,
-          studySeries: series.filter((item) => selectedSeriesIds.includes(item.id)).map((item) => ({
-            id: item.id,
-            description: item.description,
-            sequenceName: item.sequenceName,
-            plane: item.plane,
-            sliceCount: item.slices.length,
-          })),
-          currentFrame: {
-            imageId: 'current-frame',
-            seriesId: activeSeries.id,
-            seriesDescription: activeSeries.description,
-            sliceIndex,
-            fileName: activeSlice.fileName,
-            instanceNumber: activeSlice.instanceNumber,
-            dataUrl: aiImageDataUrl,
-          },
-          contextFrames,
-          chatHistory: aiChatHistory,
-        }),
+      const nextAnalysis = await requestAnalysis({
+        questionText,
+        primarySeries: activeSeries,
+        primarySlice: activeSlice,
+        primarySliceIndex: sliceIndex,
+        contextCandidates,
+        frameAnnotations,
       });
-      const json = await readJsonResponse(response);
-      if (!response.ok) throw new Error(getAnalyzeError(json));
-      const nextAnalysis = getAnalyzeResult(json);
       const normalizedAiAnnotations = (nextAnalysis.referencedAnnotations ?? []).map((annotation, index) => ({
         ...annotation,
         id: annotation.id || `ai-${Date.now()}-${index}`,
@@ -501,6 +626,120 @@ export default function MriWorkspace() {
     }
   };
 
+  const runStudyScout = async () => {
+    if (!series.length) return;
+    setIsAnalyzing(true);
+    setError('');
+    const baseQuestion = userQuestion.trim() || 'Find the most useful images for my question.';
+    const candidates = buildScoutCandidates(series, selectedSeriesIds, baseQuestion);
+    if (!candidates.length) {
+      setAnalysisStatus('No slices are available to scout yet.');
+      setIsAnalyzing(false);
+      return;
+    }
+
+    const userMessage: AiChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      text: `Study scout: ${baseQuestion}`,
+      createdAt: new Date().toISOString(),
+    };
+
+    try {
+      const batches = chunkCandidates(candidates, SCOUT_BATCH_SIZE);
+      const batchAnalyses: AiAnalysis[] = [];
+      for (const [batchIndex, batch] of batches.entries()) {
+        const primary = batch[0];
+        setAnalysisStatus(`Scout pass ${batchIndex + 1}/${batches.length}: reviewing ${batch.length} candidate slices chosen from series names/planes...`);
+        const candidateList = batch.map((candidate, index) => `${index + 1}. ${candidate.series.description} (${candidate.series.plane}) slice ${candidate.sliceIndex + 1}/${candidate.series.slices.length}; metadata reason: ${candidate.reason}`).join('\n');
+        const batchQuestion = [
+          'Study scout mode: the user wants help narrowing a full MRI study to the most useful slices, not a diagnosis.',
+          `User goal: ${baseQuestion}`,
+          'These images were preselected by metadata/series names before vision review:',
+          candidateList,
+          'Look at the supplied images and rank which ones seem most worth opening next. Be curious and concrete: say “go to this series/slice” when an image appears useful, and say when a candidate is not useful.',
+          'If the goal mentions deltoid ligament, prioritize medial ankle ligament anatomy, fluid-sensitive signal, thickening, discontinuity, edema-like brightness, or adjacent soft-tissue changes when visible.',
+        ].join('\n');
+        const analysisResult = await requestAnalysis({
+          questionText: batchQuestion,
+          primarySeries: primary.series,
+          primarySlice: primary.slice,
+          primarySliceIndex: primary.sliceIndex,
+          contextCandidates: batch.slice(1).map((candidate, index) => ({
+            series: candidate.series,
+            slice: candidate.slice,
+            sliceIndex: candidate.sliceIndex,
+            imageId: `scout-${batchIndex}-${index + 1}`,
+          })),
+          frameAnnotations: [],
+        });
+        batchAnalyses.push(analysisResult);
+      }
+
+      const findings = batchAnalyses.flatMap((item) => item.findings ?? []).slice(0, 12);
+      const firstReference = findings.flatMap((finding) => finding.references ?? [])[0] ?? {
+        seriesId: candidates[0].series.id,
+        seriesDescription: candidates[0].series.description,
+        sliceIndex: candidates[0].sliceIndex,
+        fileName: candidates[0].slice.fileName,
+        instanceNumber: candidates[0].slice.instanceNumber,
+        label: 'Top metadata-selected candidate',
+      };
+      const metadataNotes = candidates.slice(0, 8).map((candidate) => `${candidate.series.description} slice ${candidate.sliceIndex + 1}: ${candidate.reason}`);
+      const scoutAnalysis: AiAnalysis = {
+        summary: `Scout reviewed ${candidates.length} metadata-selected slices in ${batches.length} vision batch${batches.length === 1 ? '' : 'es'}. Start with ${firstReference.seriesDescription} slice ${firstReference.sliceIndex + 1}, then use the referenced-image buttons below to jump through the other promising candidates.`,
+        safetyNotice: 'Exploration mode: AI can help you navigate and compare images from a report you already have, but it still cannot confirm or rule out a tear on its own.',
+        structuresChecklist: ankleChecklist,
+        findings: findings.length ? findings : [{
+          region: 'Metadata-selected scout candidates',
+          plainLanguage: 'The AI did not return ranked visual findings, so ReadMRI is showing the best metadata-based starting points instead.',
+          whyItMatters: 'Fluid-sensitive coronal/axial ankle series are often more useful starting points for medial ligament questions than randomly scanning every slice.',
+          confidence: 'low',
+          suggestedFollowUp: 'Open these slices and compare them with the wording and image numbers in your radiology report.',
+          references: candidates.slice(0, 8).map((candidate) => ({
+            seriesId: candidate.series.id,
+            seriesDescription: candidate.series.description,
+            sliceIndex: candidate.sliceIndex,
+            fileName: candidate.slice.fileName,
+            instanceNumber: candidate.slice.instanceNumber,
+            label: `${candidate.series.description} slice ${candidate.sliceIndex + 1}`,
+          })),
+        }],
+        questionsForDoctor: [
+          'Which sequence and image number best shows the deltoid ligament abnormality mentioned in my report?',
+          'Does the inflammation/edema pattern suggest sprain, partial tear, or another medial ankle structure involvement?',
+          'Which slice should I compare over time if I get follow-up imaging?',
+        ],
+        limitations: [
+          `Scout mode reviewed ${candidates.length} of ${totalSlices} loaded slices, chosen by metadata and even spacing rather than every single image.`,
+          'Series names, planes, and thumbnails can guide navigation, but they can miss a subtle finding outside the sampled slices.',
+          ...metadataNotes,
+        ],
+        referencedAnnotations: [],
+      };
+      const assistantMessage: AiChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        text: scoutAnalysis.summary,
+        createdAt: new Date().toISOString(),
+        seriesId: firstReference.seriesId,
+        sliceIndex: firstReference.sliceIndex,
+      };
+
+      setAnalysis(scoutAnalysis);
+      setAiChatHistory((existing) => [...existing, userMessage, assistantMessage].slice(-24));
+      setAnalysisStatus(`Scout complete: narrowed ${totalSlices} loaded slices to ${candidates.length} candidates and reviewed them in Groq-friendly batches of up to ${SCOUT_BATCH_SIZE}.`);
+      jumpToReference(firstReference);
+    } catch (analysisError) {
+      const message = analysisError instanceof Error ? analysisError.message : 'AI study scout failed.';
+      setError(message);
+      setAnalysisStatus(`Study scout failed: ${message}`);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+
   return (
     <main className="shell">
       <section className="hero card">
@@ -508,17 +747,17 @@ export default function MriWorkspace() {
           <p className="eyebrow">Ankle + foot MRI education workspace</p>
           <h1>A calmer way to explore your MRI before the appointment.</h1>
           <p className="lede">
-            Upload a study, move through slices with simple controls, mark exactly what you want to ask about, and turn the image into plain-language questions for your clinician.
+            Upload a study, let AI scout the series names and candidate slices, then jump straight to images worth discussing with your clinician.
           </p>
           <div className="heroActions" aria-label="Suggested workflow">
             <a href="#upload-panel">1. Upload</a>
             <a href="#viewer-panel">2. Review slices</a>
-            <a href="#ai-panel">3. Ask AI</a>
+            <a href="#ai-panel">3. Scout + ask AI</a>
           </div>
         </div>
         <div className="safety">
-          <strong>Educational only — not a diagnosis.</strong>
-          <span>Use ReadMRI to understand anatomy, prepare questions, and organize observations. Medical decisions still require your radiology report and licensed clinicians.</span>
+          <strong>Exploration partner — not a diagnosis.</strong>
+          <span>Use ReadMRI to chase down report findings, compare slices, and organize better questions. Medical decisions still require your radiology report and licensed clinicians.</span>
         </div>
       </section>
 
@@ -720,14 +959,14 @@ export default function MriWorkspace() {
           <div className="panelHeader">
             <p className="eyebrow">Step 3</p>
             <h2>Ask in plain language</h2>
-            <p className="hint">AI uses the current frame, nearby slices, your visible notes, and the series list to explain anatomy and suggest questions.</p>
+            <p className="hint">AI can scout series names first, review a smaller set of candidate slices, then chat about the current frame like a curious study partner.</p>
           </div>
           <p className="notice">{analysis.safetyNotice}</p>
 
           <div className="currentFrameAi">
             <strong>Review scope</strong>
             <span>{activeSeries && activeSlice ? `${activeSeries.description} · slice ${sliceIndex + 1} · ${activeSlice.fileName}` : 'Upload and open a frame before asking AI.'}</span>
-            <small>For best results, mark the exact area you care about before asking.</small>
+            <small>Use Scout first for “find where the report finding might be,” then use frame chat for a close look.</small>
           </div>
 
           <div className="field">
@@ -749,9 +988,14 @@ export default function MriWorkspace() {
             </div>
           </div>
 
-          <button className="primary" onClick={runAnalysis} disabled={!activeSlice || isAnalyzing}>
-            {isAnalyzing ? 'Analyzing this frame…' : 'Ask AI about this frame'}
-          </button>
+          <div className="aiActionStack">
+            <button className="primary" onClick={runStudyScout} disabled={!series.length || isAnalyzing}>
+              {isAnalyzing ? 'AI is working…' : 'Scout study for useful slices'}
+            </button>
+            <button className="secondary" onClick={runAnalysis} disabled={!activeSlice || isAnalyzing}>
+              {isAnalyzing ? 'Analyzing this frame…' : 'Ask AI about this frame'}
+            </button>
+          </div>
           {analysisStatus && <p className={error ? 'analysisStatus error' : 'analysisStatus'}>{analysisStatus}</p>}
 
           {aiChatHistory.length > 0 && (
